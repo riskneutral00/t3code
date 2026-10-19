@@ -157,7 +157,7 @@ describe("EAS Simulator host", () => {
       const catalog = (yield* ready.devices.list).devices;
       expect(catalog.map((device) => [device.id, device.booted])).toEqual([["eas-ios", false]]);
 
-      expect(yield* ready.devices.boot(catalog[0]!)).toBe("UDID-1");
+      expect(yield* ready.devices.boot(catalog[0]!)).toBe("session-1");
       expect(expo.named("T3CreateEasSimulatorSession")[0]?.variables.input).toMatchObject({
         appId: APP_ID,
         platform: "IOS",
@@ -166,14 +166,14 @@ describe("EAS Simulator host", () => {
         maxIdleTimeMinutes: 5,
       });
       const listed = (yield* ready.devices.list).devices;
-      expect(listed.find((device) => device.id === "UDID-1")?.booted).toBe(true);
-      expect(yield* ready.devices.agentEndpoint!("UDID-1")).toEqual({
+      expect(listed.find((device) => device.id === "session-1")?.booted).toBe(true);
+      expect(yield* ready.devices.agentEndpoint!("session-1")).toEqual({
         baseUrl: "https://agent.test",
         token: "agent-token",
       });
 
       const routed = yield* ready.upstream!(
-        "/vendor/serve-sim/helper/UDID-1/webrtc/offer",
+        "/vendor/serve-sim/helper/session-1/webrtc/offer",
         new URLSearchParams("hostId=eas"),
       );
       expect(routed).toEqual({
@@ -182,7 +182,10 @@ describe("EAS Simulator host", () => {
         protocols: ["serve-sim.token.preview-token"],
       });
       expect(
-        yield* ready.upstream!("/vendor/serve-sim/helper/ws", new URLSearchParams("device=UDID-1")),
+        yield* ready.upstream!(
+          "/vendor/serve-sim/helper/ws",
+          new URLSearchParams("device=session-1"),
+        ),
       ).toMatchObject({ url: "https://preview.test/helper/ws?device=UDID-1" });
       expect(yield* ready.upstream!("/vendor/serve-emu/ws", new URLSearchParams())).toBeNull();
 
@@ -203,6 +206,38 @@ describe("EAS Simulator host", () => {
       const refused = yield* ready.devices.boot(catalogDevice!).pipe(Effect.flip);
       expect(refused.message).toContain("limited to 1 running session");
       expect(expo.named("T3CreateEasSimulatorSession")).toHaveLength(1);
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+
+  it.effect("tells concurrent sessions apart although EAS gives each the same UDID", () =>
+    Effect.gen(function* () {
+      const expo = fakeExpo();
+      const scope = yield* Scope.make();
+      const host = yield* makeHost(expo, config({ maxConcurrentSessions: 2 }), scope);
+      const ready = yield* host.ensureReady(() => Effect.void);
+      const [catalogDevice] = (yield* ready.devices.list).devices;
+      expect(yield* ready.devices.boot(catalogDevice!)).toBe("session-1");
+      expect(yield* ready.devices.boot(catalogDevice!)).toBe("session-2");
+      expect((yield* ready.devices.list).devices.map((device) => device.id)).toEqual([
+        "eas-ios",
+        "session-1",
+        "session-2",
+      ]);
+      expect(
+        yield* ready.upstream!(
+          "/vendor/serve-sim/api",
+          new URLSearchParams("device=session-2&hostId=eas"),
+        ),
+      ).toMatchObject({ url: "https://preview.test/api?device=UDID-1&hostId=eas" });
+
+      yield* ready.devices.shutdown({ id: "session-1", platform: "ios" });
+      expect(expo.stopped()).toEqual(["session-1"]);
+      expect((yield* ready.devices.list).devices.map((device) => device.id)).toEqual([
+        "eas-ios",
+        "session-2",
+      ]);
+      yield* Scope.close(scope, Exit.void);
+      expect(expo.stopped()).toEqual(["session-1", "session-2"]);
     }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 
@@ -246,7 +281,7 @@ describe("EAS Simulator host", () => {
       status = "STOPPED";
       yield* TestClock.adjust("20 seconds");
       expect((yield* ready.devices.list).devices.map((device) => device.id)).toEqual(["eas-ios"]);
-      expect(yield* ready.devices.agentEndpoint!("UDID-1").pipe(Effect.flip)).toMatchObject({
+      expect(yield* ready.devices.agentEndpoint!("session-1").pipe(Effect.flip)).toMatchObject({
         reason: "This EAS Simulator device is no longer running.",
       });
     }).pipe(Effect.scoped, Effect.provide(layer)),

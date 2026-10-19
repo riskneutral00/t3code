@@ -72,6 +72,8 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
   >();
   const hostId = config.id;
   const ledgerPath = path.join(server.stateDir, "device", "eas", `${hostId}.json`);
+  // Keyed by Expo's session id, which is also the device id: every EAS
+  // simulator reports the same UDID, so the UDID cannot tell sessions apart.
   const sessions = new Map<string, RunningSession>();
   const checkedAt = new Map<string, number>();
   const startLock = yield* Semaphore.make(1);
@@ -260,7 +262,7 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
           if (epoch !== startedIn) {
             return yield* unavailable(`${config.label} was stopped while the session started.`);
           }
-          sessions.set(udid, {
+          sessions.set(sessionId, {
             sessionId,
             udid,
             preview: { origin, token: endpoints.preview.token },
@@ -269,24 +271,24 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
               token: Redacted.value(endpoints.agentDevice.token),
             },
           });
-          return udid;
+          return sessionId;
         }).pipe(Effect.onError(() => stopSession(expo, sessionId).pipe(Effect.ignore)));
       }).pipe(Effect.ensuring(Effect.sync(() => void starting--)));
     });
 
-  const sessionFor = (udid: string) => Option.fromNullishOr(sessions.get(udid));
+  const sessionFor = (deviceId: string) => Option.fromNullishOr(sessions.get(deviceId));
 
   const forget = (session: RunningSession) =>
     Effect.sync(() => {
-      sessions.delete(session.udid);
-      checkedAt.delete(session.udid);
+      sessions.delete(session.sessionId);
+      checkedAt.delete(session.sessionId);
     });
 
   /** Expo ends sessions on its own at their run or idle limit; stop listing those. */
   const dropEnded = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
     const stale = [...sessions.values()].filter(
-      (session) => now - (checkedAt.get(session.udid) ?? 0) > STATUS_TTL_MS,
+      (session) => now - (checkedAt.get(session.sessionId) ?? 0) > STATUS_TTL_MS,
     );
     if (stale.length === 0) return;
     const expo = yield* api;
@@ -301,7 +303,7 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
                     writeLedger((ids) => ids.filter((id) => id !== session.sessionId)),
                   ),
                 )
-              : Effect.sync(() => void checkedAt.set(session.udid, now)),
+              : Effect.sync(() => void checkedAt.set(session.sessionId, now)),
           ),
           Effect.ignore,
         ),
@@ -316,7 +318,7 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
           devices: [
             ...CATALOG,
             ...[...sessions.values()].map((session): DeviceHost.HostDevice => ({
-              id: session.udid,
+              id: session.sessionId,
               platform: "ios",
               name: "iPhone (EAS Simulator)",
               version: "Cloud",
@@ -390,23 +392,33 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
       }),
   };
 
-  /** serve-sim runs at the root of each session's preview host and wants its token on every request. */
+  /**
+   * serve-sim runs at the root of each session's preview host and wants its
+   * token on every request. Clients name the device by its session id; serve-sim
+   * knows it by its UDID, so the id is swapped for the UDID in the path and in
+   * the `device` parameter.
+   */
   const upstream: NonNullable<DeviceHost.DeviceHostReady["upstream"]> = (hubPath, search) =>
     Effect.sync(() => {
       if (!hubPath.startsWith(`${SERVE_SIM_PREFIX}/`)) return null;
-      const fromPath = /^\/vendor\/serve-sim\/helper\/([^/]+)\//.exec(hubPath)?.[1];
-      const udid = fromPath ? decodeURIComponent(fromPath) : search.get("device");
+      const helper = /^\/vendor\/serve-sim\/helper\/([^/]+)\//.exec(hubPath);
+      const deviceId = helper ? decodeURIComponent(helper[1]!) : search.get("device");
       const session =
-        udid !== null && udid !== undefined
-          ? sessions.get(udid)
+        deviceId !== null && deviceId !== undefined
+          ? sessions.get(deviceId)
           : sessions.size === 1
             ? [...sessions.values()][0]
             : undefined;
       if (!session) return null;
-      const query = search.size > 0 ? `?${search.toString()}` : "";
+      const path = helper
+        ? `/helper/${encodeURIComponent(session.udid)}${hubPath.slice(helper[0].length - 1)}`
+        : hubPath.slice(SERVE_SIM_PREFIX.length);
+      const params = new URLSearchParams(search);
+      if (params.has("device")) params.set("device", session.udid);
+      const query = params.size > 0 ? `?${params.toString()}` : "";
       const token = Redacted.value(session.preview.token);
       return {
-        url: `${session.preview.origin}${hubPath.slice(SERVE_SIM_PREFIX.length)}${query}`,
+        url: `${session.preview.origin}${path}${query}`,
         headers: { authorization: `Bearer ${token}` },
         protocols: [`serve-sim.token.${token}`],
       };

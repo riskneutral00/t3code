@@ -251,6 +251,10 @@ const fixture = Effect.fn("fixture")(function* (
       }),
     ),
   );
+  // The host ending a device on its own, as EAS does at a session's limits.
+  const endDevice = () => {
+    booted = false;
+  };
   return {
     service,
     starts,
@@ -261,6 +265,7 @@ const fixture = Effect.fn("fixture")(function* (
     devices,
     encoderResult,
     discoveryErrors,
+    endDevice,
   };
 });
 
@@ -506,6 +511,21 @@ it.effect("publishes boot progress and does not restore sessions after support i
     expect(state.devices).toEqual([]);
     expect(state.sessions).toEqual([]);
     expect(state.bootingDevices).toEqual([]);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("drops a session once its host stops listing the device", () =>
+  Effect.gen(function* () {
+    const { service, endDevice } = yield* fixture();
+    yield* service.configure({ enabled: true });
+    const threadId = ThreadId.make("ended-by-host");
+    yield* service.open({ threadId, deviceId: "Pixel_API_35", platform: "android" });
+    expect((yield* service.state).sessions.map((session) => session.deviceId)).toEqual([
+      "emulator-5554",
+    ]);
+    endDevice();
+    yield* service.list;
+    expect((yield* service.state).sessions).toEqual([]);
   }).pipe(Effect.scoped),
 );
 

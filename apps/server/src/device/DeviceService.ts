@@ -385,6 +385,13 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
             ...state.devices.filter((device) => device.hostId !== ready.hostId),
             ...devices,
           ],
+          // A host can end a device itself (EAS stops sessions at their limits),
+          // and a session on a device it no longer lists has nothing to stream.
+          sessions: state.sessions.filter(
+            (session) =>
+              session.hostId !== ready.hostId ||
+              devices.some((device) => device.id === session.deviceId),
+          ),
           hostStatuses: {
             ...state.hostStatuses,
             [ready.hostId]: {
