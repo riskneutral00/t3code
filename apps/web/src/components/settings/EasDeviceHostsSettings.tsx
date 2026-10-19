@@ -1,0 +1,368 @@
+import { useState } from "react";
+import * as Cause from "effect/Cause";
+import * as Option from "effect/Option";
+import {
+  AuthSettingsWriteScope,
+  type DeviceEasAccount,
+  type EasDeviceHostConfig,
+  type EnvironmentId,
+} from "@t3tools/contracts";
+import { CloudIcon, PlusIcon, XIcon } from "lucide-react";
+
+import { randomUUID } from "../../lib/utils";
+import { deviceEnvironment } from "../../state/device";
+import { serverEnvironment } from "../../state/server";
+import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
+import { useAtomCommand } from "../../state/use-atom-command";
+import { Button } from "../ui/button";
+import {
+  Dialog,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogPanel,
+  DialogPopup,
+  DialogTitle,
+} from "../ui/dialog";
+import { Input } from "../ui/input";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
+import { Spinner } from "../ui/spinner";
+import { toastManager } from "../ui/toast";
+import {
+  easSessionLimits,
+  newEasDeviceHost,
+  parseEasDeviceHostDraft,
+  updateEasDeviceHosts,
+} from "./easDeviceHostsSettings.logic";
+import { SecretInput } from "./SecretInput";
+import { useSettingsScope } from "./SettingsScopeContext";
+import { SettingsRow } from "./settingsLayout";
+
+const FROM_THREAD_PROJECT = "thread-project";
+
+const CREDENTIAL_SOURCES: Record<DeviceEasAccount["credentialSource"], string> = {
+  settings: "the access token saved here",
+  env: "EXPO_TOKEN on the server",
+  "eas-login": "the server's eas login",
+};
+
+const failureMessage = (cause: Cause.Cause<unknown>) => {
+  const error = Cause.squash(cause);
+  return error instanceof Error ? error.message : String(error);
+};
+
+/** EAS hosts belong to one environment: its server holds the Expo credential and runs the sessions. */
+export function EasDeviceHostsSettings(props: { environmentId: EnvironmentId | null }) {
+  const { scope, connectedEnvironments } = useSettingsScope();
+  const canConfigure = useEnvironmentScope(props.environmentId, AuthSettingsWriteScope);
+  const projectScope = scope.kind === "project" || scope.kind === "checkout";
+  const update = useAtomCommand(serverEnvironment.updateSettings, { reportFailure: false });
+  const environment = connectedEnvironments.find(
+    (candidate) => candidate.environmentId === props.environmentId,
+  );
+  const hosts = environment?.serverConfig?.settings.easDeviceHosts ?? [];
+  const [editing, setEditing] = useState<{ host: EasDeviceHostConfig; isNew: boolean } | null>(
+    null,
+  );
+  const [busy, setBusy] = useState(false);
+  const disabled = !canConfigure || projectScope || busy || !props.environmentId;
+
+  const save = async (host: EasDeviceHostConfig, remove: boolean) => {
+    if (!props.environmentId || !readEnvironmentScope(props.environmentId, AuthSettingsWriteScope))
+      return;
+    setBusy(true);
+    const result = await update({
+      environmentId: props.environmentId,
+      input: { patch: { easDeviceHosts: updateEasDeviceHosts(hosts, host, remove) } },
+    });
+    setBusy(false);
+    if (result._tag === "Success") setEditing(null);
+    else
+      toastManager.add({
+        type: "error",
+        title: remove ? "EAS host not removed" : "EAS host not saved",
+        description: failureMessage(result.cause),
+      });
+  };
+
+  return (
+    <SettingsRow
+      id="eas-device-hosts"
+      title="EAS Simulator"
+      serverScoped
+      settingKeys={["easDeviceHosts"]}
+      description="Run iOS Simulators in Expo's cloud from this environment. Sessions bill the Expo account until they stop, so each host limits how many run and for how long."
+      control={
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={disabled || editing !== null}
+          onClick={() => setEditing({ host: newEasDeviceHost(randomUUID()), isNew: true })}
+        >
+          <PlusIcon className="size-3.5" /> Add EAS host
+        </Button>
+      }
+    >
+      <div className="pt-3 pb-2">
+        {hosts.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No EAS hosts.</p>
+        ) : (
+          <ul className="divide-y divide-border/40">
+            {hosts.map((host) => (
+              <li key={host.id} className="flex items-center justify-between gap-3 py-2.5 text-sm">
+                <div className="min-w-0">
+                  <p className="flex items-center gap-1.5 truncate font-medium">
+                    <CloudIcon className="size-3.5 shrink-0" /> {host.label}
+                  </p>
+                  <p className="truncate text-xs text-muted-foreground">{easSessionLimits(host)}</p>
+                </div>
+                <div className="flex shrink-0 gap-1">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={disabled}
+                    onClick={() => setEditing({ host, isNew: false })}
+                  >
+                    Edit
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost-destructive"
+                    disabled={disabled}
+                    onClick={() => void save(host, true)}
+                  >
+                    Remove
+                  </Button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+        {editing && props.environmentId ? (
+          <EasDeviceHostEditor
+            key={editing.host.id}
+            environmentId={props.environmentId}
+            host={editing.host}
+            isNew={editing.isNew}
+            busy={busy}
+            onSave={(host) => void save(host, false)}
+            onClose={() => setEditing(null)}
+          />
+        ) : null}
+      </div>
+    </SettingsRow>
+  );
+}
+
+function EasDeviceHostEditor(props: {
+  environmentId: EnvironmentId;
+  host: EasDeviceHostConfig;
+  isNew: boolean;
+  busy: boolean;
+  onSave: (host: EasDeviceHostConfig) => void;
+  onClose: () => void;
+}) {
+  const check = useAtomCommand(deviceEnvironment.easAccount, { reportFailure: false });
+  const [draft, setDraft] = useState(props.host);
+  // A saved token arrives redacted; only a replacement or a clear changes it.
+  const [token, setToken] = useState<
+    { kind: "saved" } | { kind: "new"; value: string } | { kind: "cleared" }
+  >(props.host.accessToken ? { kind: "saved" } : { kind: "cleared" });
+  const [account, setAccount] = useState<
+    | { status: "idle" }
+    | { status: "checking" }
+    | { status: "signed-in"; account: DeviceEasAccount }
+    | { status: "failed"; error: string }
+  >({ status: "idle" });
+  const next: EasDeviceHostConfig = {
+    ...draft,
+    label: draft.label.trim(),
+    accessToken:
+      token.kind === "saved" ? props.host.accessToken : token.kind === "new" ? token.value : "",
+  };
+  const valid = Option.isSome(parseEasDeviceHostDraft(next));
+  const apps = account.status === "signed-in" ? account.account.apps : [];
+
+  const checkAccount = async () => {
+    setAccount({ status: "checking" });
+    const result = await check({
+      environmentId: props.environmentId,
+      input: {
+        ...(token.kind === "saved" && !props.isNew ? { hostId: props.host.id } : {}),
+        ...(token.kind === "new" ? { accessToken: token.value } : {}),
+      },
+    });
+    setAccount(
+      result._tag === "Success"
+        ? { status: "signed-in", account: result.value }
+        : { status: "failed", error: failureMessage(result.cause) },
+    );
+  };
+
+  const limit = (
+    field: "maxSessionMinutes" | "idleMinutes" | "maxConcurrentSessions",
+    label: string,
+    max: number,
+  ) => (
+    <label className="block space-y-1.5">
+      <span>{label}</span>
+      <Input
+        type="number"
+        min={1}
+        max={max}
+        value={draft[field]}
+        disabled={props.busy}
+        onChange={(event) => {
+          const value = Number(event.target.value);
+          setDraft((current) => ({ ...current, [field]: value }));
+        }}
+      />
+    </label>
+  );
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open && !props.busy) props.onClose();
+      }}
+    >
+      <DialogPopup showCloseButton={!props.busy}>
+        <form
+          className="flex min-h-0 flex-col"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (valid && !props.busy) props.onSave(next);
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>{props.isNew ? "Add EAS host" : "Edit EAS host"}</DialogTitle>
+            <DialogDescription>
+              The environment's server signs in to Expo and starts the sessions. Without a token
+              here it uses EXPO_TOKEN, then its eas login.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogPanel>
+            <label className="block space-y-1.5 text-sm">
+              <span>Name</span>
+              <Input
+                autoFocus
+                required
+                value={draft.label}
+                disabled={props.busy}
+                onChange={(event) => {
+                  const label = event.target.value;
+                  setDraft((current) => ({ ...current, label }));
+                }}
+              />
+            </label>
+            <div className="space-y-1.5 text-sm">
+              <span>Expo access token</span>
+              <div className="flex items-center gap-2">
+                <SecretInput
+                  className="min-w-0 flex-1"
+                  configured={token.kind === "saved"}
+                  value={token.kind === "new" ? token.value : ""}
+                  disabled={props.busy}
+                  placeholder="Optional"
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setToken(value ? { kind: "new", value } : { kind: "cleared" });
+                    setAccount({ status: "idle" });
+                  }}
+                />
+                {token.kind !== "cleared" ? (
+                  <Button
+                    type="button"
+                    size="icon-sm"
+                    variant="ghost-destructive"
+                    aria-label="Clear access token"
+                    onClick={() => {
+                      setToken({ kind: "cleared" });
+                      setAccount({ status: "idle" });
+                    }}
+                  >
+                    <XIcon className="size-3.5" />
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+            <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 px-3 py-2.5">
+              <p role="status" className="min-w-0 text-xs text-muted-foreground">
+                {account.status === "signed-in"
+                  ? `Signed in as ${account.account.signedInAs} with ${CREDENTIAL_SOURCES[account.account.credentialSource]}.`
+                  : account.status === "failed"
+                    ? account.error
+                    : "Check the Expo account before choosing a project."}
+              </p>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={props.busy || account.status === "checking"}
+                onClick={() => void checkAccount()}
+              >
+                {account.status === "checking" ? <Spinner size="xs" /> : null} Check account
+              </Button>
+            </div>
+            <div className="space-y-1.5 text-sm">
+              <span>EAS project</span>
+              <Select
+                value={draft.appId ?? FROM_THREAD_PROJECT}
+                disabled={props.busy}
+                onValueChange={(value) => {
+                  if (typeof value !== "string") return;
+                  setDraft((current) => {
+                    const { appId: _, ...rest } = current;
+                    return value === FROM_THREAD_PROJECT ? rest : { ...rest, appId: value };
+                  });
+                }}
+              >
+                <SelectTrigger size="sm" aria-label="EAS project">
+                  <SelectValue>
+                    {(value: string) =>
+                      value === FROM_THREAD_PROJECT
+                        ? "From the thread's project"
+                        : (apps.find((app) => app.id === value)?.fullName ?? value)
+                    }
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup>
+                  <SelectItem value={FROM_THREAD_PROJECT}>From the thread's project</SelectItem>
+                  {draft.appId && !apps.some((app) => app.id === draft.appId) ? (
+                    <SelectItem value={draft.appId}>{draft.appId}</SelectItem>
+                  ) : null}
+                  {apps.map((app) => (
+                    <SelectItem key={app.id} value={app.id}>
+                      {app.fullName}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Sessions bill the project's Expo account. "From the thread's project" reads
+                extra.eas.projectId from the project's app config.
+              </p>
+            </div>
+            <div className="grid grid-cols-3 gap-3 text-sm">
+              {limit("maxConcurrentSessions", "Sessions at once", 20)}
+              {limit("maxSessionMinutes", "Session minutes", 115)}
+              {limit("idleMinutes", "Idle minutes", 60)}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Expo allows sessions of up to 40 minutes on free accounts and 115 on paid ones.
+            </p>
+          </DialogPanel>
+          <DialogFooter>
+            <Button type="button" variant="ghost" disabled={props.busy} onClick={props.onClose}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={props.busy || !valid}>
+              {props.busy ? <Spinner size="xs" /> : null} Save host
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogPopup>
+    </Dialog>
+  );
+}

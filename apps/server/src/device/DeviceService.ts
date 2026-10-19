@@ -17,6 +17,8 @@ import {
   type DeviceSession,
   type DeviceShutdownInput,
   type DeviceSummary,
+  type DeviceEasAccount,
+  type DeviceEasAccountInput,
   type DeviceHostConfig,
   type EasDeviceHostConfig,
   type SshDeviceHostConfig,
@@ -46,6 +48,7 @@ import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
+import { HttpClient } from "effect/http";
 
 import * as ServerSettings from "../serverSettings.ts";
 import { isLocalSshDeviceHost, remoteSshDeviceHosts } from "./localSshDeviceHost.ts";
@@ -55,6 +58,7 @@ import * as ProcessRunner from "../processRunner.ts";
 import * as DeviceHost from "./DeviceHost.ts";
 import * as SshDeviceHost from "./SshDeviceHost.ts";
 import * as EasDeviceHost from "./EasDeviceHost.ts";
+import { makeExpoApi, resolveExpoCredential } from "./ExpoApi.ts";
 import * as Exit from "effect/Exit";
 import * as LocalDeviceHost from "./LocalDeviceHost.ts";
 
@@ -103,6 +107,10 @@ export class DeviceService extends Context.Service<
     readonly testHost: (
       config: SshDeviceHostConfig,
     ) => Effect.Effect<DeviceHostSummary, DeviceError>;
+    /** Who an Expo credential signs in as and which EAS projects it can run sessions under. */
+    readonly easAccount: (
+      input: DeviceEasAccountInput,
+    ) => Effect.Effect<DeviceEasAccount, DeviceError>;
     /**
      * The agent-device flags that reach the device: its config and session,
      * and the id agent-device selects it by, which can differ from its id here.
@@ -804,6 +812,13 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
         ),
       retryHost,
       inspect,
+      easAccount: (input) =>
+        Effect.fail(
+          new DeviceHostUnavailableError({
+            hostId: input.hostId ?? "eas",
+            reason: "EAS accounts are unavailable in this device service.",
+          }),
+        ),
       agentCli: Effect.fail(
         new DeviceHostUnavailableError({
           hostId: LOCAL_DEVICE_HOST_ID,
@@ -1077,8 +1092,32 @@ export const make = Effect.gen(function* () {
       concurrency: 4,
     }),
   );
+  const easAccount: DeviceService["Service"]["easAccount"] = (input) =>
+    Effect.gen(function* () {
+      const saved =
+        input.hostId === undefined
+          ? ""
+          : ((yield* settings.getSettings).easDeviceHosts.find((host) => host.id === input.hostId)
+              ?.accessToken ?? "");
+      const credential = yield* resolveExpoCredential(input.accessToken || saved);
+      const viewer = yield* makeExpoApi(yield* HttpClient.HttpClient, credential).viewer;
+      return { signedInAs: viewer.name, credentialSource: credential.source, apps: viewer.apps };
+    }).pipe(
+      Effect.provide(easContext),
+      Effect.mapError(
+        (cause) =>
+          new DeviceHostUnavailableError({
+            hostId: input.hostId ?? "eas",
+            reason: cause.message,
+            cause,
+          }),
+      ),
+      Effect.withSpan("DeviceService.easAccount"),
+    );
+
   return {
     ...service,
+    easAccount,
     agentCli: resolveNodeExecutable("Device automation").pipe(
       Effect.andThen(ensureAgentDevice(config.baseDir)),
       Effect.provideService(FileSystem.FileSystem, fs),
