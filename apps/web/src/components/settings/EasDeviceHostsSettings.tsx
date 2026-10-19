@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import {
@@ -164,6 +164,7 @@ function EasDeviceHostEditor(props: {
 }) {
   const check = useAtomCommand(deviceEnvironment.easAccount, { reportFailure: false });
   const [draft, setDraft] = useState(props.host);
+  const tokenId = useId();
   // A saved token arrives redacted; only a replacement or a clear changes it.
   const [token, setToken] = useState<
     { kind: "saved" } | { kind: "new"; value: string } | { kind: "cleared" }
@@ -257,9 +258,12 @@ function EasDeviceHostEditor(props: {
               />
             </label>
             <div className="space-y-1.5 text-sm">
-              <span>Expo access token</span>
+              <label htmlFor={tokenId} className="block">
+                Expo access token
+              </label>
               <div className="flex items-center gap-2">
                 <SecretInput
+                  id={tokenId}
                   className="min-w-0 flex-1"
                   configured={token.kind === "saved"}
                   value={token.kind === "new" ? token.value : ""}
