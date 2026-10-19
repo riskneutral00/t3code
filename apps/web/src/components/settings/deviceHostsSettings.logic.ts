@@ -1,4 +1,4 @@
-import type { EnvironmentId, SshDeviceHostConfig } from "@t3tools/contracts";
+import type { DeviceHostConfig, EnvironmentId, SshDeviceHostConfig } from "@t3tools/contracts";
 
 export interface DeviceHostEnvironment {
   readonly environmentId: EnvironmentId;
@@ -14,6 +14,9 @@ export interface DeviceHostGroup {
     readonly host: SshDeviceHostConfig;
   }>;
 }
+
+export const sshDeviceHosts = (hosts: ReadonlyArray<DeviceHostConfig>) =>
+  hosts.filter((host): host is SshDeviceHostConfig => host.kind === "ssh");
 
 /** Only combine matching configurations; ambiguous identities keep their machine's list. */
 export function groupDeviceHosts(
@@ -52,18 +55,20 @@ export function groupDeviceHosts(
   return [...groups.values()];
 }
 
+/** Edits one SSH host; hosts of other kinds keep their place. */
 export function updateDeviceHosts(
-  hosts: ReadonlyArray<SshDeviceHostConfig>,
+  hosts: ReadonlyArray<DeviceHostConfig>,
   host: SshDeviceHostConfig,
   remove: boolean,
   original = host,
-): ReadonlyArray<SshDeviceHostConfig> {
+): ReadonlyArray<DeviceHostConfig> {
+  const sshHosts = sshDeviceHosts(hosts);
   const sameDestination = (candidate: SshDeviceHostConfig, other: SshDeviceHostConfig) =>
     candidate.target === other.target &&
     candidate.port === other.port &&
     candidate.identityFile === other.identityFile;
   const findDestination = (destination: SshDeviceHostConfig) => {
-    const matches = hosts.filter((candidate) => sameDestination(candidate, destination));
+    const matches = sshHosts.filter((candidate) => sameDestination(candidate, destination));
     if (matches.length > 1) {
       throw new Error(
         "Multiple hosts match this SSH destination. Select the environment to edit its hosts.",
@@ -72,7 +77,7 @@ export function updateDeviceHosts(
     return matches[0];
   };
   const existing =
-    hosts.find((candidate) => candidate.id === original.id) ??
+    sshHosts.find((candidate) => candidate.id === original.id) ??
     findDestination(original) ??
     (remove ? undefined : findDestination(host));
   if (remove) return hosts.filter((candidate) => candidate.id !== existing?.id);

@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import { Effect, Schema } from "effect";
 
 import { ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
@@ -10,11 +10,15 @@ export type DeviceHostId = typeof DeviceHostId.Type;
 
 export const LOCAL_DEVICE_HOST_ID = "local" as DeviceHostId;
 
+const ConfiguredDeviceHostId = DeviceHostId.check(
+  Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/),
+  Schema.makeFilter((id) => id !== "local" || "The local host id is reserved."),
+);
+
 export const SshDeviceHostConfig = Schema.Struct({
-  id: DeviceHostId.check(
-    Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/),
-    Schema.makeFilter((id) => id !== "local" || "The local host id is reserved."),
-  ),
+  // Hosts saved before EAS hosts existed carry no kind.
+  kind: Schema.Literal("ssh").pipe(Schema.withDecodingDefaultKey(Effect.succeed("ssh" as const))),
+  id: ConfiguredDeviceHostId,
   label: TrimmedNonEmptyString,
   target: TrimmedNonEmptyString.check(Schema.isPattern(/^[^\s-][^\s]*$/)),
   identityFile: Schema.optional(TrimmedNonEmptyString),
@@ -22,7 +26,33 @@ export const SshDeviceHostConfig = Schema.Struct({
 });
 export type SshDeviceHostConfig = typeof SshDeviceHostConfig.Type;
 
-export const SshDeviceHostConfigs = Schema.Array(SshDeviceHostConfig).check(
+/**
+ * Cloud simulators from EAS Simulator. Sessions bill the Expo account until
+ * they stop, so every one is bounded. The Expo credential is not stored here.
+ */
+export const EasDeviceHostConfig = Schema.Struct({
+  kind: Schema.Literal("eas"),
+  id: ConfiguredDeviceHostId,
+  label: TrimmedNonEmptyString,
+  /** EAS project that sessions run under, when the project's app config does not name one. */
+  appId: Schema.optional(TrimmedNonEmptyString),
+  /** EAS allows at most 40 minutes on free accounts and 115 on paid ones. */
+  maxSessionMinutes: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 115 })).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed(30)),
+  ),
+  idleMinutes: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 60 })).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed(10)),
+  ),
+  maxConcurrentSessions: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 20 })).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed(2)),
+  ),
+});
+export type EasDeviceHostConfig = typeof EasDeviceHostConfig.Type;
+
+export const DeviceHostConfig = Schema.Union([SshDeviceHostConfig, EasDeviceHostConfig]);
+export type DeviceHostConfig = typeof DeviceHostConfig.Type;
+
+export const DeviceHostConfigs = Schema.Array(DeviceHostConfig).check(
   Schema.makeFilter(
     (hosts) =>
       new Set(hosts.map((host) => host.id)).size === hosts.length ||
@@ -66,7 +96,7 @@ export type DeviceToolVersions = typeof DeviceToolVersions.Type;
 
 export const DeviceHostSummary = Schema.Struct({
   id: DeviceHostId,
-  kind: Schema.Literals(["local", "ssh"]),
+  kind: Schema.Literals(["local", "ssh", "eas"]),
   label: TrimmedNonEmptyString,
   platforms: Schema.Array(DevicePlatformAvailability),
   tools: Schema.optional(DeviceToolVersions),

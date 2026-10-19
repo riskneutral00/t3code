@@ -17,6 +17,7 @@ import {
   type DeviceSession,
   type DeviceShutdownInput,
   type DeviceSummary,
+  type DeviceHostConfig,
   type SshDeviceHostConfig,
   type DeviceHostSummary,
   LOCAL_DEVICE_HOST_ID,
@@ -916,11 +917,11 @@ export const make = Effect.gen(function* () {
     yield* Effect.context<Effect.Services<ReturnType<typeof SshDeviceHost.make>>>();
   const configured = new Map<string, { config: SshDeviceHostConfig; scope: Scope.Closeable }>();
   const reconcile = Effect.fn("DeviceService.reconcile")(function* (
-    configuredHosts: ReadonlyArray<SshDeviceHostConfig>,
+    configuredHosts: ReadonlyArray<DeviceHostConfig>,
   ) {
-    const next = yield* remoteSshDeviceHosts(configuredHosts).pipe(
-      Effect.provide(localTargetContext),
-    );
+    const next = yield* remoteSshDeviceHosts(
+      configuredHosts.filter((host): host is SshDeviceHostConfig => host.kind === "ssh"),
+    ).pipe(Effect.provide(localTargetContext));
     const removed = yield* service.withLifecycleLock(
       Effect.gen(function* () {
         const removed: Array<{ id: string; scope: Scope.Closeable }> = [];

@@ -2,8 +2,13 @@ import { describe, expect, it } from "vite-plus/test";
 import { updateDeviceHosts } from "./deviceHostsSettings.logic";
 
 describe("device host changes across environments", () => {
-  const shared = { id: "shared", label: "Mac mini", target: "julius@macmini" };
-  const local = { id: "other", label: "Android", target: "julius@android" };
+  const shared = {
+    kind: "ssh" as const,
+    id: "shared",
+    label: "Mac mini",
+    target: "julius@macmini",
+  };
+  const local = { kind: "ssh" as const, id: "other", label: "Android", target: "julius@android" };
 
   it("adds to differing host lists without losing environment-specific hosts, including on retry", () => {
     const environments = [[], [local], [shared, local]];
@@ -29,6 +34,22 @@ describe("device host changes across environments", () => {
     expect(saved).toEqual([{ ...edited, id: remote.id }, local]);
     expect(updateDeviceHosts(saved, edited, false, shared)).toEqual(saved);
     expect(updateDeviceHosts([remote, local], shared, true)).toEqual([local]);
+  });
+
+  it("leaves EAS hosts in place while SSH hosts are added, edited and removed", () => {
+    const eas = {
+      kind: "eas" as const,
+      id: "eas",
+      label: "EAS Simulator",
+      maxSessionMinutes: 30,
+      idleMinutes: 10,
+      maxConcurrentSessions: 2,
+    };
+    const added = updateDeviceHosts([eas], shared, false);
+    expect(added).toEqual([eas, shared]);
+    const edited = { ...shared, target: "julius@new-address" };
+    expect(updateDeviceHosts(added, edited, false)).toEqual([eas, edited]);
+    expect(updateDeviceHosts(added, shared, true)).toEqual([eas]);
   });
 
   it("keeps distinct SSH connections to the same target separate", () => {
