@@ -18,7 +18,8 @@ export function createDeviceEnvironmentAtoms<R, E>(
   };
   // An EAS Simulator start can take minutes; it must not hold up powering off
   // another device or turning device support off, so each device opens in its
-  // own lane.
+  // own lane. Every EAS start opens the same catalog device, so the thread is
+  // part of the lane too.
   const openConcurrency = {
     mode: "serial" as const,
     key: ({
@@ -26,8 +27,13 @@ export function createDeviceEnvironmentAtoms<R, E>(
       input,
     }: {
       environmentId: string;
-      input: { readonly hostId?: string | undefined; readonly deviceId: string };
-    }) => JSON.stringify([environmentId, "open", input.hostId ?? null, input.deviceId]),
+      input: {
+        readonly threadId: string;
+        readonly hostId?: string | undefined;
+        readonly deviceId: string;
+      };
+    }) =>
+      JSON.stringify([environmentId, "open", input.threadId, input.hostId ?? null, input.deviceId]),
   };
   return {
     state: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
