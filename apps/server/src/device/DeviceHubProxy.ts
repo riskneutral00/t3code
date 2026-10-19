@@ -83,10 +83,12 @@ const forwardHeaders = (request: HttpServerRequest.HttpServerRequest, origin: st
 const proxyWebSocket = Effect.fn("DeviceHubProxy.proxyWebSocket")(function* (
   request: HttpServerRequest.HttpServerRequest,
   upstreamUrl: string,
+  protocols: ReadonlyArray<string> = [],
 ) {
   const client = yield* request.upgrade;
   const upstream = yield* Socket.makeWebSocket(upstreamUrl, {
     openTimeout: "10 seconds",
+    ...(protocols.length > 0 ? { protocols: [...protocols] } : {}),
   }).pipe(Effect.provide(NodeSocket.layerWebSocketConstructor));
   yield* Effect.scoped(
     Effect.gen(function* () {
@@ -115,12 +117,15 @@ const pumpFrames =
 const proxyHttp = Effect.fn("DeviceHubProxy.proxyHttp")(function* (
   request: HttpServerRequest.HttpServerRequest,
   upstreamUrl: string,
-  hubOrigin: string,
+  extraHeaders: Readonly<Record<string, string>> = {},
 ) {
   const httpClient = HttpClient.withScope(yield* HttpClient.HttpClient);
   const method = request.method;
   const upstreamRequest = HttpClientRequest.make(method)(upstreamUrl).pipe(
-    HttpClientRequest.setHeaders(forwardHeaders(request, hubOrigin)),
+    HttpClientRequest.setHeaders({
+      ...forwardHeaders(request, new URL(upstreamUrl).origin),
+      ...extraHeaders,
+    }),
     method === "GET" || method === "HEAD"
       ? (self) => self
       : // A bare stream body is sent as octet-stream; serve-sim refuses WebRTC
@@ -183,14 +188,16 @@ const handler = Effect.gen(function* () {
   upstreamSearch.delete("wsTicket");
   upstreamSearch.delete("hostId");
   const search = upstreamSearch.size > 0 ? `?${upstreamSearch.toString()}` : "";
-  const upstreamPath = `${hubPath}${search}`;
-  if (upgrade) {
-    return yield* proxyWebSocket(
-      request,
-      `${ready.hub.origin.replace(/^http/, "ws")}${upstreamPath}`,
-    );
+  // Hosts with several upstreams (one per cloud session) route and authenticate requests themselves.
+  const routed = ready.upstream ? yield* ready.upstream(hubPath, upstreamSearch) : undefined;
+  if (routed === null) {
+    return HttpServerResponse.text("Not Found", { status: 404 });
   }
-  return yield* proxyHttp(request, `${ready.hub.origin}${upstreamPath}`, ready.hub.origin);
+  const upstreamUrl = routed?.url ?? `${ready.hub.origin}${hubPath}${search}`;
+  if (upgrade) {
+    return yield* proxyWebSocket(request, upstreamUrl.replace(/^http/, "ws"), routed?.protocols);
+  }
+  return yield* proxyHttp(request, upstreamUrl, routed?.headers);
 });
 
 export const layer = HttpRouter.add("*", `${DeviceService.DEVICE_HUB_ROUTE_PREFIX}/*`, handler);

@@ -1,6 +1,7 @@
 import type {
   DeviceBootError,
   DeviceHostId,
+  DeviceHostUnavailableError,
   DeviceHostSummary,
   DeviceOperationError,
   DevicePlatform,
@@ -76,6 +77,20 @@ export interface AgentDeviceEndpoint {
 
 export type HostDevice = Omit<DeviceSummary, "hostId">;
 
+/** Where a device is being opened from, for hosts whose devices depend on the project. */
+export interface DeviceOpenContext {
+  readonly workspaceRoot?: string | undefined;
+}
+
+export type AgentDaemonEndpoint = Pick<AgentDeviceEndpoint, "baseUrl" | "token">;
+
+/** Where the proxy sends a device hub request, for hosts that serve several upstreams. */
+export interface HubUpstream {
+  readonly url: string;
+  readonly headers: Readonly<Record<string, string>>;
+  readonly protocols: ReadonlyArray<string>;
+}
+
 /** Discovery and lifecycle for the devices a ready host can run. */
 export interface DeviceOperations {
   readonly list: Effect.Effect<
@@ -93,7 +108,8 @@ export interface DeviceOperations {
    */
   readonly boot: (
     device: HostDevice,
-  ) => Effect.Effect<string, DeviceOperationError | DeviceBootError>;
+    context?: DeviceOpenContext,
+  ) => Effect.Effect<string, DeviceOperationError | DeviceBootError | DeviceHostUnavailableError>;
   /** Prepares the stream of a device that is already booted. */
   readonly attach: (device: HostDevice) => Effect.Effect<void, DeviceOperationError>;
   readonly shutdown: (device: {
@@ -101,6 +117,10 @@ export interface DeviceOperations {
     readonly platform: DevicePlatform;
   }) => Effect.Effect<void, DeviceOperationError>;
   readonly screenshot: (device: HostDevice) => Effect.Effect<Uint8Array, DeviceOperationError>;
+  /** For hosts that run one agent-device daemon per device instead of one per host. */
+  readonly agentEndpoint?: (
+    deviceId: string,
+  ) => Effect.Effect<AgentDaemonEndpoint, DeviceHostUnavailableError>;
 }
 
 export interface DeviceHostReady {
@@ -116,10 +136,16 @@ export interface DeviceHostReady {
     readonly serveSimAxSettings: string | null;
     readonly serveSimCli: string | null;
   };
+  /** Routes proxied hub requests itself; otherwise they go to `hub.origin`. */
+  readonly upstream?: (
+    hubPath: string,
+    search: URLSearchParams,
+  ) => Effect.Effect<HubUpstream | null>;
 }
 
 export interface DeviceHostAgentReady extends DeviceHostReady {
-  readonly agentDevice: AgentDeviceEndpoint;
+  /** Null when each device has its own daemon; see `DeviceOperations.agentEndpoint`. */
+  readonly agentDevice: AgentDeviceEndpoint | null;
 }
 
 export class DeviceHost extends Context.Service<
