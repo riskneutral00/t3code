@@ -174,7 +174,8 @@ function EasDeviceHostEditor(props: {
     | { status: "checking" }
     | { status: "signed-in"; account: DeviceEasAccount }
     | { status: "failed"; error: string }
-  >({ status: "idle" });
+    // The editor checks the account as it opens.
+  >({ status: "checking" });
   const next: EasDeviceHostConfig = {
     ...draft,
     label: draft.label.trim(),
@@ -191,9 +192,8 @@ function EasDeviceHostEditor(props: {
     latestCheck.current++;
     setAccount({ status: "idle" });
   };
-  const checkAccount = async () => {
+  const requestCheck = async () => {
     const run = ++latestCheck.current;
-    setAccount({ status: "checking" });
     const result = await check({
       environmentId: props.environmentId,
       input: {
@@ -208,10 +208,14 @@ function EasDeviceHostEditor(props: {
         : { status: "failed", error: failureMessage(result.cause) },
     );
   };
+  const checkAccount = () => {
+    setAccount({ status: "checking" });
+    void requestCheck();
+  };
 
   // Checking on open names the saved project and shows a rejected credential
   // before anything is changed.
-  const checkOnOpen = useEffectEvent(() => void checkAccount());
+  const checkOnOpen = useEffectEvent(() => void requestCheck());
   useEffect(() => {
     checkOnOpen();
   }, []);
