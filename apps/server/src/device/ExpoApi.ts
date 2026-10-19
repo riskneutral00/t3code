@@ -83,7 +83,6 @@ const credential = (
 export class ExpoApiError extends Schema.TaggedError<ExpoApiError>()("ExpoApiError", {
   operation: Schema.String,
   detail: Schema.optional(Schema.String),
-  cause: Schema.optional(Schema.Defect()),
 }) {
   override get message(): string {
     return `Expo could not ${this.operation}${this.detail ? `: ${this.detail}` : "."}`;
@@ -155,10 +154,9 @@ class ExpoAuth extends GraphQLMiddleware.Service<ExpoAuth>()("t3/server/device/E
 const ExpoGroup = ExpoApiGraphQLGroup.middleware(ExpoAuth);
 
 /**
- * Expo's answer as an `ExpoApiError`. A transport error's cause holds the
- * request with its credential header. `httpObservability` redacts that header
- * where the server renders headers, but these errors also travel to clients
- * as RPC defects, so the cause is dropped.
+ * Expo's answer as an `ExpoApiError`, which has no cause: a transport error's
+ * holds the request with its credential header, and a decode error's can
+ * quote session tokens. These errors also travel to clients as RPC defects.
  */
 const toExpoApiError = (
   operation: string,
@@ -183,7 +181,6 @@ const toExpoApiError = (
     case "EncodeError":
       return failure("the request could not be encoded");
     default:
-      // A decode error can quote the answer, session tokens included.
       return failure("unexpected response");
   }
 };

@@ -56,6 +56,38 @@ it.effect("falls back to app.json, and does not compute a project id a config bu
   }).pipe(Effect.scoped, Effect.provide(layer)),
 );
 
+it.effect.each([
+  {
+    case: "skips a project id in a comment",
+    config: `// projectId: "${ID_B}" (the old production project)
+      /* extra: { eas: { projectId: "${ID_B}" } } */
+      export default { extra: { eas: { projectId: "${ID_A}" } }, url: "https://expo.dev" };`,
+    expected: Option.some(ID_A),
+  },
+  {
+    case: "gives no answer when the config names two projects",
+    config: `export default ({ config }) => ({
+        extra: { eas: { projectId: process.env.PROD ? "${ID_A}" : "${ID_B}" } },
+      });`,
+    expected: Option.none(),
+  },
+])("$case", ({ config, expected }) =>
+  Effect.gen(function* () {
+    expect(yield* findEasProjectId(yield* workspace({ "app.config.js": config }))).toEqual(
+      expected,
+    );
+  }).pipe(Effect.scoped, Effect.provide(layer)),
+);
+
+it.effect("reads app.config.json like app.json", () =>
+  Effect.gen(function* () {
+    const root = yield* workspace({
+      "app.config.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_B } } } }),
+    });
+    expect(yield* findEasProjectId(root)).toEqual(Option.some(ID_B));
+  }).pipe(Effect.scoped, Effect.provide(layer)),
+);
+
 it.effect("does not guess between apps that name different EAS projects", () =>
   Effect.gen(function* () {
     const root = yield* workspace({

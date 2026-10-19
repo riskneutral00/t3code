@@ -11,9 +11,23 @@ const CONFIG_FILES = [
   "app.config.mjs",
   "app.config.cjs",
 ];
+const JSON_CONFIG_FILES = ["app.config.json", "app.json"];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LITERAL_PROJECT_ID =
-  /projectId["']?\s*:\s*["'`]([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["'`]/i;
+  /projectId["']?\s*:\s*["'`]([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["'`]/gi;
+// Good enough for config files: a `//` inside a string literal is rare, and
+// a missed comment only makes the answer ambiguous, never wrong.
+const COMMENTS = /\/\*[\s\S]*?\*\/|(^|[^:])\/\/.*$/gm;
+
+/** The one project id a config's code names; none when it names several. */
+const literalProjectId = (source: string) => {
+  const ids = new Set(
+    [...source.replace(COMMENTS, "$1").matchAll(LITERAL_PROJECT_ID)].map((match) =>
+      match[1]!.toLowerCase(),
+    ),
+  );
+  return ids.size === 1 ? Option.some([...ids][0]!) : Option.none<string>();
+};
 
 const decodeAppJson = Schema.decodeUnknownOption(
   Schema.fromJsonString(
@@ -33,7 +47,8 @@ const decodeAppJson = Schema.decodeUnknownOption(
 
 /**
  * Read, never run: a dynamic config is the project's own code, which an agent
- * may have written, so only a literal `projectId` in it or in app.json counts.
+ * may have written, so only a literal `projectId` in it, outside comments, or
+ * in app.config.json or app.json counts.
  */
 const projectIdOf = Effect.fn("easProjectId.projectIdOf")(function* (dir: string) {
   const fs = yield* FileSystem.FileSystem;
@@ -45,14 +60,18 @@ const projectIdOf = Effect.fn("easProjectId.projectIdOf")(function* (dir: string
     const source = yield* fs
       .readFileString(path.join(dir, configFile.value))
       .pipe(Effect.orElseSucceed(() => ""));
-    const literal = LITERAL_PROJECT_ID.exec(source)?.[1];
-    if (literal) return Option.some(literal);
+    const literal = literalProjectId(source);
+    if (Option.isSome(literal)) return literal;
   }
-  const appJson = yield* fs.readFileString(path.join(dir, "app.json")).pipe(Effect.option);
-  return Option.flatMap(appJson, decodeAppJson).pipe(
-    Option.flatMap((value) => Option.fromNullishOr(value.expo?.extra?.eas?.projectId)),
-    Option.filter((id) => UUID.test(id)),
-  );
+  for (const file of JSON_CONFIG_FILES) {
+    const json = yield* fs.readFileString(path.join(dir, file)).pipe(Effect.option);
+    const id = Option.flatMap(json, decodeAppJson).pipe(
+      Option.flatMap((value) => Option.fromNullishOr(value.expo?.extra?.eas?.projectId)),
+      Option.filter((id) => UUID.test(id)),
+    );
+    if (Option.isSome(id)) return id;
+  }
+  return Option.none<string>();
 });
 
 /**
