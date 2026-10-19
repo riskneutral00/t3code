@@ -15,6 +15,7 @@ import {
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
@@ -23,6 +24,7 @@ import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as ServerConfig from "../config.ts";
@@ -52,15 +54,36 @@ const CATALOG: ReadonlyArray<DeviceHost.HostDevice> = [
 
 interface RunningSession {
   readonly sessionId: string;
+  readonly name: string;
   readonly udid: string;
   readonly preview: { readonly origin: string; readonly token: Redacted.Redacted<string> };
   readonly agent: DeviceHost.AgentDaemonEndpoint;
+  /** Set once a stop has been asked for but Expo has not confirmed it. */
+  stopping: boolean;
 }
 
-const Ledger = Schema.fromJsonString(Schema.Array(Schema.String));
-const decodeLedger = Schema.decodeUnknownOption(Ledger);
+/**
+ * Every session this host may have started, recorded by its unique name before
+ * Expo is asked to create it, so a server that crashes at any point can still
+ * find and stop the session on its next start.
+ */
+const LedgerEntry = Schema.Struct({ name: Schema.String, appId: Schema.String });
+type LedgerEntry = typeof LedgerEntry.Type;
+const Ledger = Schema.fromJsonString(Schema.Array(LedgerEntry));
+const decodeLedger = Schema.decodeUnknownEffect(Ledger);
 const encodeLedger = Schema.encodeSync(Ledger);
+// How often listing looks for recorded sessions this host no longer tracks.
+const REAP_INTERVAL_MS = 60_000;
 const decodePreviewApi = Schema.decodeUnknownEffect(Schema.Struct({ device: Schema.String }));
+
+/** A malformed escape names no device, so the proxy answers 404 instead of failing. */
+const decodePathSegment = (segment: string): string | null => {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return null;
+  }
+};
 
 export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDeviceHostConfig) {
   const http = yield* HttpClient.HttpClient;
@@ -78,10 +101,15 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
   const checkedAt = new Map<string, number>();
   const startLock = yield* Semaphore.make(1);
   const ledgerLock = yield* Semaphore.make(1);
+  // Starts run in the host's scope rather than the caller's: a client that
+  // disconnects while a session boots leaves it running and tracked, and
+  // closing the host interrupts the start, which then stops its session.
+  const hostScope = yield* Effect.scope;
   let starting = 0;
   // Bumped whenever the host stops its sessions, so a start that finishes
   // afterwards stops its own session instead of leaving it untracked.
   let epoch = 0;
+  let reapedAt = 0;
   let ready: DeviceHost.DeviceHostReady | null = null;
 
   const unavailable = (reason: string, cause?: unknown) =>
@@ -100,34 +128,96 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
     Effect.mapError((error) => unavailable(error.message, error)),
   );
 
+  /** A missing ledger is empty; an unreadable one is an error, never an empty list. */
   const readLedger = fs.readFileString(ledgerPath).pipe(
-    Effect.map((text) => Option.getOrElse(decodeLedger(text), () => [])),
-    Effect.orElseSucceed((): ReadonlyArray<string> => []),
+    Effect.catchIf(
+      (error) => error.reason._tag === "NotFound",
+      () => Effect.succeed("[]"),
+    ),
+    Effect.flatMap(decodeLedger),
+    Effect.mapError((cause) =>
+      unavailable(
+        `The record of running EAS sessions at ${ledgerPath} could not be read. Fix or remove it.`,
+        cause,
+      ),
+    ),
   );
-  const writeLedger = (update: (ids: ReadonlyArray<string>) => ReadonlyArray<string>) =>
+  const writeLedger = (
+    update: (entries: ReadonlyArray<LedgerEntry>) => ReadonlyArray<LedgerEntry>,
+  ) =>
     Effect.gen(function* () {
-      const next = update(yield* readLedger);
-      yield* fs.makeDirectory(path.dirname(ledgerPath), { recursive: true });
-      yield* fs.writeFileString(ledgerPath, encodeLedger([...new Set(next)]));
-    }).pipe(Effect.ignore, ledgerLock.withPermit);
+      const entries = update(yield* readLedger);
+      yield* writeFileStringAtomically({
+        filePath: ledgerPath,
+        contents: encodeLedger(entries),
+      }).pipe(
+        Effect.provide(services),
+        Effect.mapError((cause) =>
+          unavailable(
+            `The record of running EAS sessions at ${ledgerPath} could not be written.`,
+            cause,
+          ),
+        ),
+      );
+    }).pipe(ledgerLock.withPermit);
+  const forgetEntry = (name: string) =>
+    writeLedger((entries) => entries.filter((entry) => entry.name !== name)).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("Could not update the EAS session record", { name, cause }),
+      ),
+    );
 
-  const stopSession = (expo: ExpoApi, sessionId: string) =>
+  /** Stops a session and, once Expo confirms it, drops it from the ledger. */
+  const stopSession = (expo: ExpoApi, sessionId: string, name: string) =>
     expo.stop(sessionId).pipe(
-      Effect.andThen(writeLedger((ids) => ids.filter((id) => id !== sessionId))),
+      Effect.andThen(forgetEntry(name)),
       Effect.tapError((cause) =>
         Effect.logWarning("Could not stop EAS Simulator session", { sessionId, cause }),
       ),
     );
 
-  /** Sessions a previous server started and could not stop still bill until stopped. */
-  const reapLeftovers = (expo: ExpoApi) =>
-    readLedger.pipe(
-      Effect.flatMap((ids) =>
-        Effect.forEach(
-          ids.filter((id) => ![...sessions.values()].some((session) => session.sessionId === id)),
-          (id) => stopSession(expo, id).pipe(Effect.ignore),
-          { discard: true, concurrency: 4 },
+  /** Finds recorded sessions by name, so a session whose id never arrived is found too. */
+  const stopRecorded = (expo: ExpoApi, entries: ReadonlyArray<LedgerEntry>) =>
+    Effect.forEach(
+      [...new Set(entries.map((entry) => entry.appId))],
+      (appId) =>
+        expo.activeSessions(appId).pipe(
+          Effect.flatMap((active) =>
+            Effect.forEach(
+              entries.filter((entry) => entry.appId === appId),
+              (entry) => {
+                const running = active.filter((session) => session.name === entry.name);
+                return running.length === 0
+                  ? forgetEntry(entry.name)
+                  : Effect.forEach(
+                      running,
+                      (session) => stopSession(expo, session.id, entry.name),
+                      {
+                        discard: true,
+                      },
+                    );
+              },
+              { discard: true },
+            ),
+          ),
+          Effect.ignore,
         ),
+      { discard: true, concurrency: 4 },
+    );
+
+  /** Sessions a previous server, or a start that failed, recorded but nothing tracks. */
+  const reapLeftovers = (expo: ExpoApi) =>
+    Effect.gen(function* () {
+      reapedAt = yield* Clock.currentTimeMillis;
+      const tracked = new Set([...sessions.values()].map((session) => session.name));
+      const entries = yield* readLedger;
+      yield* stopRecorded(
+        expo,
+        entries.filter((entry) => !tracked.has(entry.name)),
+      );
+    }).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("Could not stop recorded EAS Simulator sessions", { cause }),
       ),
     );
 
@@ -179,106 +269,124 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
       }),
     );
 
-  const startSession = (device: DeviceHost.HostDevice, context?: DeviceHost.DeviceOpenContext) =>
-    Effect.gen(function* () {
-      const expo = yield* api;
-      const startedIn = epoch;
-      const reserved = yield* startLock.withPermit(
-        Effect.sync(() => {
-          if (sessions.size + starting >= config.maxConcurrentSessions) return false;
-          starting++;
-          return true;
-        }),
-      );
-      if (!reserved) {
-        return yield* unavailable(
-          `${config.label} is limited to ${config.maxConcurrentSessions} running ${config.maxConcurrentSessions === 1 ? "session" : "sessions"}. Close one in the Device panel first.`,
+  const reserveSlot = startLock.withPermit(
+    Effect.suspend(() => {
+      if (sessions.size + starting >= config.maxConcurrentSessions) {
+        return Effect.fail(
+          unavailable(
+            `${config.label} is limited to ${config.maxConcurrentSessions} running ${config.maxConcurrentSessions === 1 ? "session" : "sessions"}. Close one in the Device panel first.`,
+          ),
         );
       }
-      return yield* Effect.gen(function* () {
-        const appId =
-          config.appId ??
-          Option.getOrUndefined(
-            context?.workspaceRoot
-              ? yield* findEasProjectId(context.workspaceRoot).pipe(Effect.provide(services))
-              : Option.none<string>(),
+      starting++;
+      return Effect.void;
+    }),
+  );
+
+  const startSession = (
+    device: DeviceHost.HostDevice,
+    context: DeviceHost.DeviceOpenContext | undefined,
+    startedIn: number,
+  ) =>
+    Effect.acquireUseRelease(
+      reserveSlot,
+      () =>
+        Effect.gen(function* () {
+          const expo = yield* api;
+          const appId =
+            config.appId ??
+            Option.getOrUndefined(
+              context?.workspaceRoot
+                ? yield* findEasProjectId(context.workspaceRoot).pipe(Effect.provide(services))
+                : Option.none<string>(),
+            );
+          if (!appId) {
+            return yield* unavailable(
+              "No EAS project to run the session under. Choose one for this host in Settings, or open the device from a thread whose project names extra.eas.projectId in app.json or its app config.",
+            );
+          }
+          const access = yield* expo
+            .availability(appId)
+            .pipe(Effect.mapError((error) => unavailable(error.message, error)));
+          if (!access.available) {
+            return yield* unavailable(
+              `EAS Simulator is not enabled for the ${access.account} Expo account.`,
+            );
+          }
+          const name = `T3 Code · ${config.label} · ${(yield* Random.nextIntBetween(0, 0xffffff)).toString(16).padStart(6, "0")}`;
+          const entry = { name, appId };
+          // Recorded first: a session the ledger cannot hold is never started.
+          yield* writeLedger((entries) => [...entries, entry]);
+          if (epoch !== startedIn) {
+            yield* forgetEntry(name);
+            return yield* unavailable(`${config.label} was stopped while the session started.`);
+          }
+          // Create runs uninterrupted (Expo's API answers within 30 seconds) and
+          // the stop below is in place before anything can interrupt the start,
+          // so a session Expo made is always either tracked or stopped.
+          return yield* Effect.uninterruptibleMask((restore) =>
+            Effect.gen(function* () {
+              const sessionId = yield* expo
+                .create({
+                  appId,
+                  platform: device.platform,
+                  name,
+                  maxRunTimeMinutes: config.maxSessionMinutes,
+                  maxIdleTimeMinutes: config.idleMinutes,
+                })
+                .pipe(
+                  // Expo may have made the session before failing to answer.
+                  Effect.tapError(() => stopRecorded(expo, [entry])),
+                  Effect.mapError((error) => unavailable(error.message, error)),
+                );
+              return yield* restore(trackSession(expo, sessionId, name, startedIn)).pipe(
+                Effect.onError(() => stopSession(expo, sessionId, name).pipe(Effect.ignore)),
+              );
+            }),
           );
-        if (!appId) {
-          return yield* unavailable(
-            "No EAS project to run the session under. Choose one for this host in Settings, or open the device from a thread whose project has an Expo app config with extra.eas.projectId.",
-          );
-        }
-        const access = yield* expo
-          .availability(appId)
-          .pipe(Effect.mapError((error) => unavailable(error.message, error)));
-        if (!access.available) {
-          return yield* unavailable(
-            `EAS Simulator is not enabled for the ${access.account} Expo account.`,
-          );
-        }
-        // A unique name finds this session again if creating it fails after Expo made it.
-        const name = `T3 Code · ${config.label} · ${(yield* Random.nextIntBetween(0, 0xffffff)).toString(16).padStart(6, "0")}`;
-        const sessionId = yield* expo
-          .create({
-            appId,
-            platform: device.platform,
-            name,
-            maxRunTimeMinutes: config.maxSessionMinutes,
-            maxIdleTimeMinutes: config.idleMinutes,
-          })
-          .pipe(
-            Effect.tapError(() =>
-              expo.activeSessions(appId).pipe(
-                Effect.flatMap((active) =>
-                  Effect.forEach(
-                    active.filter((session) => session.name === name),
-                    (session) => stopSession(expo, session.id),
-                    { discard: true },
-                  ),
-                ),
-                Effect.ignore,
-              ),
-            ),
-            Effect.mapError((error) => unavailable(error.message, error)),
-          );
-        yield* writeLedger((ids) => [...ids, sessionId]);
-        return yield* Effect.gen(function* () {
-          const endpoints = yield* awaitRunning(expo, sessionId);
-          if (!endpoints.preview) {
-            return yield* new DeviceBootError({
+        }),
+      () => Effect.sync(() => void starting--),
+    );
+
+  /** Waits for a created session and starts tracking it. */
+  const trackSession = (expo: ExpoApi, sessionId: string, name: string, startedIn: number) =>
+    Effect.gen(function* () {
+      const endpoints = yield* awaitRunning(expo, sessionId);
+      if (!endpoints.preview) {
+        return yield* new DeviceBootError({
+          hostId,
+          deviceId: sessionId,
+          reason: "launch_failed",
+          cause: new Error("EAS Simulator returned no preview endpoint"),
+        });
+      }
+      const origin = new URL(endpoints.preview.url).origin;
+      const udid = yield* previewDevice(origin, endpoints.preview.token).pipe(
+        Effect.mapError(
+          (cause) =>
+            new DeviceBootError({
               hostId,
               deviceId: sessionId,
               reason: "launch_failed",
-              cause: new Error("EAS Simulator returned no preview endpoint"),
-            });
-          }
-          const origin = new URL(endpoints.preview.url).origin;
-          const udid = yield* previewDevice(origin, endpoints.preview.token).pipe(
-            Effect.mapError(
-              (cause) =>
-                new DeviceBootError({
-                  hostId,
-                  deviceId: sessionId,
-                  reason: "launch_failed",
-                  cause,
-                }),
-            ),
-          );
-          if (epoch !== startedIn) {
-            return yield* unavailable(`${config.label} was stopped while the session started.`);
-          }
-          sessions.set(sessionId, {
-            sessionId,
-            udid,
-            preview: { origin, token: endpoints.preview.token },
-            agent: {
-              baseUrl: endpoints.agentDevice.url,
-              token: Redacted.value(endpoints.agentDevice.token),
-            },
-          });
-          return sessionId;
-        }).pipe(Effect.onError(() => stopSession(expo, sessionId).pipe(Effect.ignore)));
-      }).pipe(Effect.ensuring(Effect.sync(() => void starting--)));
+              cause,
+            }),
+        ),
+      );
+      if (epoch !== startedIn) {
+        return yield* unavailable(`${config.label} was stopped while the session started.`);
+      }
+      sessions.set(sessionId, {
+        sessionId,
+        name,
+        udid,
+        preview: { origin, token: endpoints.preview.token },
+        agent: {
+          baseUrl: endpoints.agentDevice.url,
+          token: Redacted.value(endpoints.agentDevice.token),
+        },
+        stopping: false,
+      });
+      return sessionId;
     });
 
   const sessionFor = (deviceId: string) => Option.fromNullishOr(sessions.get(deviceId));
@@ -289,32 +397,49 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
       checkedAt.delete(session.sessionId);
     });
 
-  /** Expo ends sessions on its own at their run or idle limit; stop listing those. */
+  /**
+   * Expo ends sessions on its own at their run or idle limit; stop listing
+   * those. A stop that failed earlier is retried, and recorded sessions nothing
+   * tracks are reaped now and then.
+   */
   const dropEnded = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
     const stale = [...sessions.values()].filter(
-      (session) => now - (checkedAt.get(session.sessionId) ?? 0) > STATUS_TTL_MS,
+      (session) =>
+        session.stopping || now - (checkedAt.get(session.sessionId) ?? 0) > STATUS_TTL_MS,
     );
-    if (stale.length === 0) return;
+    const reapDue = now - reapedAt > REAP_INTERVAL_MS;
+    if (stale.length === 0 && !reapDue) return;
     const expo = yield* api;
     yield* Effect.forEach(
       stale,
       (session) =>
-        expo.session(session.sessionId).pipe(
-          Effect.flatMap((current) =>
-            current.status === "STOPPED" || current.status === "ERRORED"
-              ? forget(session).pipe(
-                  Effect.andThen(
-                    writeLedger((ids) => ids.filter((id) => id !== session.sessionId)),
-                  ),
-                )
-              : Effect.sync(() => void checkedAt.set(session.sessionId, now)),
-          ),
-          Effect.ignore,
-        ),
+        (session.stopping
+          ? stopSession(expo, session.sessionId, session.name).pipe(Effect.andThen(forget(session)))
+          : expo
+              .session(session.sessionId)
+              .pipe(
+                Effect.flatMap((current) =>
+                  current.status === "STOPPED" || current.status === "ERRORED"
+                    ? forget(session).pipe(Effect.andThen(forgetEntry(session.name)))
+                    : Effect.sync(() => void checkedAt.set(session.sessionId, now)),
+                ),
+              )
+        ).pipe(Effect.ignore),
       { discard: true, concurrency: 4 },
     );
+    if (reapDue) yield* reapLeftovers(expo);
   }).pipe(Effect.ignore);
+
+  /**
+   * Stops a tracked session. Until Expo confirms, it stays tracked: listed,
+   * counted against the limit, and retried by the next listing.
+   */
+  const stopTracked = (expo: ExpoApi, session: RunningSession) =>
+    Effect.suspend(() => {
+      session.stopping = true;
+      return stopSession(expo, session.sessionId, session.name);
+    }).pipe(Effect.andThen(forget(session)));
 
   const devices: DeviceHost.DeviceOperations = {
     list: dropEnded.pipe(
@@ -335,17 +460,23 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
         })),
       ),
     ),
-    boot: (device, context) =>
-      sessions.has(device.id) ? Effect.succeed(device.id) : startSession(device, context),
+    boot: (device, context) => {
+      if (sessions.has(device.id)) return Effect.succeed(device.id);
+      // Read before anything yields, so a stop that lands while the start
+      // reads settings or files is seen.
+      const startedIn = epoch;
+      return startSession(device, context, startedIn).pipe(
+        Effect.forkIn(hostScope),
+        Effect.flatMap(Fiber.join),
+      );
+    },
     attach: () => Effect.void,
     shutdown: (device) =>
       Option.match(sessionFor(device.id), {
         onNone: () => Effect.void,
-        // Forgotten even if stopping fails: the ledger keeps it for the next start to stop.
         onSome: (session) =>
           api.pipe(
-            Effect.flatMap((expo) => stopSession(expo, session.sessionId)),
-            Effect.ensuring(forget(session)),
+            Effect.flatMap((expo) => stopTracked(expo, session)),
             Effect.asVoid,
             Effect.mapError(
               (cause) =>
@@ -393,8 +524,10 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
     agentEndpoint: (deviceId) =>
       Option.match(sessionFor(deviceId), {
         onNone: () => Effect.fail(unavailable("This EAS Simulator device is no longer running.")),
-        onSome: (session) => Effect.succeed(session.agent),
+        // agent-device selects the simulator by its UDID, not the session id T3 shows.
+        onSome: (session) => Effect.succeed({ ...session.agent, agentDeviceId: session.udid }),
       }),
+    endsDevices: true,
   };
 
   /**
@@ -407,7 +540,8 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
     Effect.sync(() => {
       if (!hubPath.startsWith(`${SERVE_SIM_PREFIX}/`)) return null;
       const helper = /^\/vendor\/serve-sim\/helper\/([^/]+)\//.exec(hubPath);
-      const deviceId = helper ? decodeURIComponent(helper[1]!) : search.get("device");
+      const deviceId = helper ? decodePathSegment(helper[1]!) : search.get("device");
+      if (helper && deviceId === null) return null;
       const session =
         deviceId !== null && deviceId !== undefined
           ? sessions.get(deviceId)
@@ -456,6 +590,8 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
       return ready;
     });
 
+  // A session whose stop fails stays tracked for the next listing to retry,
+  // and stays in the ledger for the next server if this one closes first.
   const stopAll = Effect.suspend(() => {
     epoch++;
     return sessions.size === 0
@@ -464,11 +600,7 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
           Effect.flatMap((expo) =>
             Effect.forEach(
               [...sessions.values()],
-              (session) =>
-                stopSession(expo, session.sessionId).pipe(
-                  Effect.ensuring(forget(session)),
-                  Effect.ignore,
-                ),
+              (session) => stopTracked(expo, session).pipe(Effect.ignore),
               { discard: true, concurrency: 4 },
             ),
           ),

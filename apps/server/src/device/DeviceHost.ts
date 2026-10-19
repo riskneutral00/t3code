@@ -117,10 +117,22 @@ export interface DeviceOperations {
     readonly platform: DevicePlatform;
   }) => Effect.Effect<void, DeviceOperationError>;
   readonly screenshot: (device: HostDevice) => Effect.Effect<Uint8Array, DeviceOperationError>;
-  /** For hosts that run one agent-device daemon per device instead of one per host. */
+  /**
+   * For hosts that run one agent-device daemon per device instead of one per
+   * host. `agentDeviceId` is the id agent-device selects the device by, when
+   * it differs from the host's device id.
+   */
   readonly agentEndpoint?: (
     deviceId: string,
-  ) => Effect.Effect<AgentDaemonEndpoint, DeviceHostUnavailableError>;
+  ) => Effect.Effect<
+    AgentDaemonEndpoint & { readonly agentDeviceId: string },
+    DeviceHostUnavailableError
+  >;
+  /**
+   * Set by hosts that end devices on their own (EAS stops sessions at their
+   * limits), so a session on a device the host stops listing is dropped.
+   */
+  readonly endsDevices?: boolean;
 }
 
 export interface DeviceHostReady {

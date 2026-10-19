@@ -89,6 +89,7 @@ const fixture = Effect.fn("fixture")(function* (
     | DeviceHost.AgentDeviceStartError,
   inspectError = false,
   installTool?: Parameters<typeof DeviceService.makeWithHosts>[3],
+  options: { readonly endsDevices?: boolean } = {},
 ) {
   const settings = yield* Ref.make(DEFAULT_SERVER_SETTINGS);
   const starts: string[] = [];
@@ -160,13 +161,16 @@ const fixture = Effect.fn("fixture")(function* (
   const ready: DeviceHost.DeviceHostReady = {
     nodePath: process.execPath,
     hub: { origin: "http://device.test" },
-    devices: makeDeviceHubOperations({
-      hostId: LOCAL_DEVICE_HOST_ID,
-      origin: "http://device.test",
-      http,
-      run,
-      androidAvailable: Effect.succeed(true),
-    }),
+    devices: {
+      ...makeDeviceHubOperations({
+        hostId: LOCAL_DEVICE_HOST_ID,
+        origin: "http://device.test",
+        http,
+        run,
+        androidAvailable: Effect.succeed(true),
+      }),
+      ...(options.endsDevices ? { endsDevices: true } : {}),
+    },
     helpers: { serveSimAxSettings: null, serveSimCli: null },
     run,
   };
@@ -515,9 +519,24 @@ it.effect("publishes boot progress and does not restore sessions after support i
   }).pipe(Effect.scoped),
 );
 
-it.effect("drops a session once its host stops listing the device", () =>
+it.effect.each([
+  { case: "drops it on a host that ends devices itself", endsDevices: true, kept: 0 },
+  {
+    case: "keeps it on a host that can miss a device for one listing",
+    endsDevices: false,
+    kept: 1,
+  },
+])("when a host stops listing a session's device, $case", ({ endsDevices, kept }) =>
   Effect.gen(function* () {
-    const { service, endDevice } = yield* fixture();
+    const { service, endDevice } = yield* fixture(
+      Effect.void,
+      undefined,
+      false,
+      undefined,
+      false,
+      undefined,
+      { endsDevices },
+    );
     yield* service.configure({ enabled: true });
     const threadId = ThreadId.make("ended-by-host");
     yield* service.open({ threadId, deviceId: "Pixel_API_35", platform: "android" });
@@ -526,7 +545,7 @@ it.effect("drops a session once its host stops listing the device", () =>
     ]);
     endDevice();
     yield* service.list;
-    expect((yield* service.state).sessions).toEqual([]);
+    expect((yield* service.state).sessions).toHaveLength(kept);
   }).pipe(Effect.scoped),
 );
 

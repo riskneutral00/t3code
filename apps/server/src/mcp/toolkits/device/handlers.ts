@@ -177,13 +177,16 @@ const handlers = {
         ) ?? target;
       // Target the opened device: an EAS device and its agent-device daemon
       // exist only once its session runs, and Android ids change on boot.
-      const agentArgs = yield* devices.agentTarget({
+      const agent = yield* devices.agentTarget({
         threadId: scope.thread.threadId,
         hostId: device.hostId,
         deviceId: device.id,
       });
       const cloud = after.hosts.some((host) => host.id === device.hostId && host.kind === "eas");
-      const targetArgs = [...agentDeviceTargetArgs(device), ...agentArgs];
+      const targetArgs = [
+        ...agentDeviceTargetArgs({ ...device, id: agent.agentDeviceId }),
+        ...agent.args,
+      ];
       const config = yield* ServerConfig.ServerConfig;
       const path = yield* Path.Path;
       const platform = yield* HostProcess.Platform;

@@ -137,7 +137,12 @@ const layerDeviceServiceMock = Layer.mock(DeviceService.DeviceService)({
   close: () => Effect.void,
   agentCli: Effect.succeed("/cli"),
   testHost: () => Effect.die("not used"),
-  agentTarget: () => Effect.succeed(["--config", "/host.json", "--session", "thread-device"]),
+  // As for an EAS device, agent-device knows the device by a different id than T3.
+  agentTarget: () =>
+    Effect.succeed({
+      agentDeviceId: "SIM-UDID",
+      args: ["--config", "/host.json", "--session", "thread-device"],
+    }),
 });
 
 const layerTest = McpHttpServer.layerDeviceToolkit.pipe(
@@ -203,7 +208,7 @@ it.effect("registers the device tools and returns the screenshot as image conten
         .pipe(callWith(["device"]), Effect.provideService(McpSchema.McpServerClient, client));
       expect(opened.isError).toBe(false);
       const openedContent = opened.structuredContent as { quickStart: string };
-      expect(openedContent.quickStart).toContain("--udid UDID-1");
+      expect(openedContent.quickStart).toContain("--udid SIM-UDID");
 
       const shot = yield* server
         .callTool({ name: "device_screenshot", arguments: { deviceId: "UDID-1" } })
