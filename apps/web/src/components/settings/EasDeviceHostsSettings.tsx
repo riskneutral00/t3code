@@ -1,4 +1,4 @@
-import { useEffect, useEffectEvent, useId, useState } from "react";
+import { useEffect, useEffectEvent, useId, useRef, useState } from "react";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import {
@@ -184,7 +184,15 @@ function EasDeviceHostEditor(props: {
   const valid = Option.isSome(parseEasDeviceHostDraft(next));
   const apps = account.status === "signed-in" ? account.account.apps : [];
 
+  // A check answers for the credential it was asked about: a later check or a
+  // token edit makes an earlier answer stale.
+  const latestCheck = useRef(0);
+  const resetAccount = () => {
+    latestCheck.current++;
+    setAccount({ status: "idle" });
+  };
   const checkAccount = async () => {
+    const run = ++latestCheck.current;
     setAccount({ status: "checking" });
     const result = await check({
       environmentId: props.environmentId,
@@ -193,6 +201,7 @@ function EasDeviceHostEditor(props: {
         ...(token.kind === "new" ? { accessToken: token.value } : {}),
       },
     });
+    if (run !== latestCheck.current) return;
     setAccount(
       result._tag === "Success"
         ? { status: "signed-in", account: result.value }
@@ -279,7 +288,7 @@ function EasDeviceHostEditor(props: {
                   onChange={(event) => {
                     const value = event.target.value;
                     setToken(value ? { kind: "new", value } : { kind: "cleared" });
-                    setAccount({ status: "idle" });
+                    resetAccount();
                   }}
                 />
                 {token.kind !== "cleared" ? (
@@ -290,7 +299,7 @@ function EasDeviceHostEditor(props: {
                     aria-label="Clear access token"
                     onClick={() => {
                       setToken({ kind: "cleared" });
-                      setAccount({ status: "idle" });
+                      resetAccount();
                     }}
                   >
                     <XIcon className="size-3.5" />
@@ -364,6 +373,7 @@ function EasDeviceHostEditor(props: {
             </div>
             <p className="text-xs text-muted-foreground">
               Expo allows sessions of up to 40 minutes on free accounts and 115 on paid ones.
+              {props.isNew ? null : " Saving restarts this host, which stops its running sessions."}
             </p>
           </DialogPanel>
           <DialogFooter>
