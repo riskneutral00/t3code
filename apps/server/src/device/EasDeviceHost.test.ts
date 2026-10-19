@@ -1,12 +1,15 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import type { EasDeviceHostConfig } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Scope from "effect/Scope";
+import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/http";
 
 import * as ServerConfig from "../config.ts";
@@ -28,26 +31,45 @@ const config = (overrides: Partial<EasDeviceHostConfig> = {}): EasDeviceHostConf
 });
 
 /** Expo's API and one session's preview host, recording what was asked of them. */
-const fakeExpo = () => {
+const fakeExpo = (
+  options: {
+    readonly status?: () => string;
+    readonly failCreate?: boolean;
+    readonly previewGate?: {
+      readonly requested: Deferred.Deferred<void>;
+      readonly release: Deferred.Deferred<void>;
+    };
+  } = {},
+) => {
   const calls: Array<{ operation: string; variables: Record<string, unknown> }> = [];
   let created = 0;
+  let createdName = "";
   const http = HttpClient.make((request) =>
-    Effect.sync(() => {
+    Effect.gen(function* () {
       const url = new URL(request.url);
       if (url.origin === "https://preview.test") {
         expect(request.headers.authorization).toBe("Bearer preview-token");
+        if (options.previewGate) {
+          yield* Deferred.succeed(options.previewGate.requested, undefined);
+          yield* Deferred.await(options.previewGate.release);
+        }
         return HttpClientResponse.fromWeb(request, Response.json({ device: "UDID-1" }));
       }
       const body =
         request.body._tag === "Uint8Array"
           ? (JSON.parse(new TextDecoder().decode(request.body.body)) as {
               query: string;
-              variables: Record<string, unknown>;
+              variables: Record<string, { name?: string } & Record<string, unknown>>;
             })
           : { query: "", variables: {} };
       expect(request.headers.authorization).toBe("Bearer expo-token");
       const operation = /(?:query|mutation) (\w+)/.exec(body.query)?.[1] ?? "unknown";
       calls.push({ operation, variables: body.variables });
+      if (operation === "T3CreateEasSimulatorSession") {
+        createdName = body.variables.input?.name ?? "";
+        if (options.failCreate)
+          return HttpClientResponse.fromWeb(request, new Response("bad gateway", { status: 502 }));
+      }
       const data =
         operation === "T3EasSimulatorAvailability"
           ? {
@@ -62,31 +84,51 @@ const fakeExpo = () => {
             }
           : operation === "T3CreateEasSimulatorSession"
             ? { deviceRunSession: { createDeviceRunSession: { id: `session-${++created}` } } }
-            : operation === "T3EasSimulatorSession"
+            : operation === "T3ActiveEasSimulatorSessions"
               ? {
-                  deviceRunSessions: {
+                  app: {
                     byId: {
-                      id: body.variables.id,
-                      status: "IN_PROGRESS",
-                      remoteConfig: {
-                        agentDeviceRemoteSessionUrl: "https://agent.test",
-                        agentDeviceRemoteSessionToken: "agent-token",
-                        webPreviewToken: "preview-token",
-                        previewApiUrl: "https://preview.test?token=preview-token",
+                      deviceRunSessionsPaginated: {
+                        edges: [
+                          { node: { id: "orphan", status: "NEW", name: createdName } },
+                          {
+                            node: {
+                              id: "someone-else",
+                              status: "IN_PROGRESS",
+                              name: "T3 Code · EAS Simulator · 000000",
+                            },
+                          },
+                        ],
                       },
                     },
                   },
                 }
-              : {
-                  deviceRunSession: {
-                    ensureDeviceRunSessionStopped: { id: body.variables.id, status: "STOPPED" },
-                  },
-                };
+              : operation === "T3EasSimulatorSession"
+                ? {
+                    deviceRunSessions: {
+                      byId: {
+                        id: body.variables.id,
+                        status: options.status?.() ?? "IN_PROGRESS",
+                        remoteConfig: {
+                          agentDeviceRemoteSessionUrl: "https://agent.test",
+                          agentDeviceRemoteSessionToken: "agent-token",
+                          webPreviewToken: "preview-token",
+                          previewApiUrl: "https://preview.test?token=preview-token",
+                        },
+                      },
+                    },
+                  }
+                : {
+                    deviceRunSession: {
+                      ensureDeviceRunSessionStopped: { id: body.variables.id, status: "STOPPED" },
+                    },
+                  };
       return HttpClientResponse.fromWeb(request, Response.json({ data }));
     }),
   );
   const named = (operation: string) => calls.filter((call) => call.operation === operation);
-  return { http, named };
+  const stopped = () => named("T3StopEasSimulatorSession").map((call) => call.variables.id);
+  return { http, named, stopped };
 };
 
 const layer = Layer.mergeAll(
@@ -190,6 +232,54 @@ describe("EAS Simulator host", () => {
       const failure = yield* ready.devices.boot(catalogDevice!).pipe(Effect.flip);
       expect(failure.message).toContain("Choose one for this host in Settings");
       expect(expo.named("T3CreateEasSimulatorSession")).toHaveLength(0);
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+  it.effect("stops listing sessions Expo already ended", () =>
+    Effect.gen(function* () {
+      let status = "IN_PROGRESS";
+      const expo = fakeExpo({ status: () => status });
+      const host = yield* makeHost(expo, config(), yield* Scope.make());
+      const ready = yield* host.ensureReady(() => Effect.void);
+      const [catalogDevice] = (yield* ready.devices.list).devices;
+      yield* ready.devices.boot(catalogDevice!);
+      status = "STOPPED";
+      yield* TestClock.adjust("20 seconds");
+      expect((yield* ready.devices.list).devices.map((device) => device.id)).toEqual(["eas-ios"]);
+      expect(yield* ready.devices.agentEndpoint!("UDID-1").pipe(Effect.flip)).toMatchObject({
+        reason: "This EAS Simulator device is no longer running.",
+      });
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+
+  it.effect("stops a session that finishes starting after the host stopped", () =>
+    Effect.gen(function* () {
+      const previewGate = {
+        requested: yield* Deferred.make<void>(),
+        release: yield* Deferred.make<void>(),
+      };
+      const expo = fakeExpo({ previewGate });
+      const host = yield* makeHost(expo, config(), yield* Scope.make());
+      const ready = yield* host.ensureReady(() => Effect.void);
+      const [catalogDevice] = (yield* ready.devices.list).devices;
+      const booting = yield* ready.devices.boot(catalogDevice!).pipe(Effect.forkChild);
+      yield* Deferred.await(previewGate.requested);
+      yield* host.stop;
+      yield* Deferred.succeed(previewGate.release, undefined);
+      const failure = yield* Fiber.join(booting).pipe(Effect.flip);
+      expect(failure.message).toContain("was stopped while the session started");
+      expect(expo.stopped()).toEqual(["session-1"]);
+      expect((yield* ready.devices.list).devices.map((device) => device.id)).toEqual(["eas-ios"]);
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+
+  it.effect("stops only its own session when creating one fails after Expo made it", () =>
+    Effect.gen(function* () {
+      const expo = fakeExpo({ failCreate: true });
+      const host = yield* makeHost(expo, config(), yield* Scope.make());
+      const ready = yield* host.ensureReady(() => Effect.void);
+      const [catalogDevice] = (yield* ready.devices.list).devices;
+      yield* ready.devices.boot(catalogDevice!).pipe(Effect.flip);
+      expect(expo.stopped()).toEqual(["orphan"]);
     }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 });

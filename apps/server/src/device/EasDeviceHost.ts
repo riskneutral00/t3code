@@ -12,11 +12,13 @@ import {
   type DevicePlatform,
   type EasDeviceHostConfig,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Random from "effect/Random";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
@@ -29,6 +31,8 @@ import { findEasProjectId } from "./easProjectId.ts";
 import { type ExpoApi, makeExpoApi, resolveExpoCredential } from "./ExpoApi.ts";
 
 const POLL_INTERVAL = Duration.seconds(5);
+// How stale a running session's status may get before listing rechecks it.
+const STATUS_TTL_MS = 15_000;
 // Expo's own CLI waits this long once a worker picks the session up.
 const START_TIMEOUT = Duration.minutes(15);
 const PREVIEW_TIMEOUT = Duration.seconds(20);
@@ -69,8 +73,13 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
   const hostId = config.id;
   const ledgerPath = path.join(server.stateDir, "device", "eas", `${hostId}.json`);
   const sessions = new Map<string, RunningSession>();
+  const checkedAt = new Map<string, number>();
   const startLock = yield* Semaphore.make(1);
+  const ledgerLock = yield* Semaphore.make(1);
   let starting = 0;
+  // Bumped whenever the host stops its sessions, so a start that finishes
+  // afterwards stops its own session instead of leaving it untracked.
+  let epoch = 0;
   let ready: DeviceHost.DeviceHostReady | null = null;
 
   const unavailable = (reason: string, cause?: unknown) =>
@@ -93,7 +102,7 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
       const next = update(yield* readLedger);
       yield* fs.makeDirectory(path.dirname(ledgerPath), { recursive: true });
       yield* fs.writeFileString(ledgerPath, encodeLedger([...new Set(next)]));
-    }).pipe(Effect.ignore);
+    }).pipe(Effect.ignore, ledgerLock.withPermit);
 
   const stopSession = (expo: ExpoApi, sessionId: string) =>
     expo.stop(sessionId).pipe(
@@ -166,6 +175,7 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
   const startSession = (device: DeviceHost.HostDevice, context?: DeviceHost.DeviceOpenContext) =>
     Effect.gen(function* () {
       const expo = yield* api;
+      const startedIn = epoch;
       const reserved = yield* startLock.withPermit(
         Effect.sync(() => {
           if (sessions.size + starting >= config.maxConcurrentSessions) return false;
@@ -199,15 +209,31 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
             `EAS Simulator is not enabled for the ${access.account} Expo account.`,
           );
         }
+        // A unique name finds this session again if creating it fails after Expo made it.
+        const name = `T3 Code · ${config.label} · ${(yield* Random.nextIntBetween(0, 0xffffff)).toString(16).padStart(6, "0")}`;
         const sessionId = yield* expo
           .create({
             appId,
             platform: device.platform,
-            name: `T3 Code · ${config.label}`,
+            name,
             maxRunTimeMinutes: config.maxSessionMinutes,
             maxIdleTimeMinutes: config.idleMinutes,
           })
-          .pipe(Effect.mapError((error) => unavailable(error.message, error)));
+          .pipe(
+            Effect.tapError(() =>
+              expo.activeSessions(appId).pipe(
+                Effect.flatMap((active) =>
+                  Effect.forEach(
+                    active.filter((session) => session.name === name),
+                    (session) => stopSession(expo, session.id),
+                    { discard: true },
+                  ),
+                ),
+                Effect.ignore,
+              ),
+            ),
+            Effect.mapError((error) => unavailable(error.message, error)),
+          );
         yield* writeLedger((ids) => [...ids, sessionId]);
         return yield* Effect.gen(function* () {
           const endpoints = yield* awaitRunning(expo, sessionId);
@@ -231,6 +257,9 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
                 }),
             ),
           );
+          if (epoch !== startedIn) {
+            return yield* unavailable(`${config.label} was stopped while the session started.`);
+          }
           sessions.set(udid, {
             sessionId,
             udid,
@@ -247,31 +276,69 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
 
   const sessionFor = (udid: string) => Option.fromNullishOr(sessions.get(udid));
 
+  const forget = (session: RunningSession) =>
+    Effect.sync(() => {
+      sessions.delete(session.udid);
+      checkedAt.delete(session.udid);
+    });
+
+  /** Expo ends sessions on its own at their run or idle limit; stop listing those. */
+  const dropEnded = Effect.gen(function* () {
+    const now = yield* Clock.currentTimeMillis;
+    const stale = [...sessions.values()].filter(
+      (session) => now - (checkedAt.get(session.udid) ?? 0) > STATUS_TTL_MS,
+    );
+    if (stale.length === 0) return;
+    const expo = yield* api;
+    yield* Effect.forEach(
+      stale,
+      (session) =>
+        expo.session(session.sessionId).pipe(
+          Effect.flatMap((current) =>
+            current.status === "STOPPED" || current.status === "ERRORED"
+              ? forget(session).pipe(
+                  Effect.andThen(
+                    writeLedger((ids) => ids.filter((id) => id !== session.sessionId)),
+                  ),
+                )
+              : Effect.sync(() => void checkedAt.set(session.udid, now)),
+          ),
+          Effect.ignore,
+        ),
+      { discard: true, concurrency: 4 },
+    );
+  }).pipe(Effect.ignore);
+
   const devices: DeviceHost.DeviceOperations = {
-    list: Effect.sync(() => ({
-      devices: [
-        ...CATALOG,
-        ...[...sessions.values()].map((session): DeviceHost.HostDevice => ({
-          id: session.udid,
-          platform: "ios",
-          name: "iPhone (EAS Simulator)",
-          version: "Cloud",
-          booted: true,
-          physical: false,
+    list: dropEnded.pipe(
+      Effect.andThen(
+        Effect.sync(() => ({
+          devices: [
+            ...CATALOG,
+            ...[...sessions.values()].map((session): DeviceHost.HostDevice => ({
+              id: session.udid,
+              platform: "ios",
+              name: "iPhone (EAS Simulator)",
+              version: "Cloud",
+              booted: true,
+              physical: false,
+            })),
+          ],
+          detail: undefined,
         })),
-      ],
-      detail: undefined,
-    })),
+      ),
+    ),
     boot: (device, context) =>
       sessions.has(device.id) ? Effect.succeed(device.id) : startSession(device, context),
     attach: () => Effect.void,
     shutdown: (device) =>
       Option.match(sessionFor(device.id), {
         onNone: () => Effect.void,
+        // Forgotten even if stopping fails: the ledger keeps it for the next start to stop.
         onSome: (session) =>
           api.pipe(
             Effect.flatMap((expo) => stopSession(expo, session.sessionId)),
-            Effect.andThen(Effect.sync(() => sessions.delete(session.udid))),
+            Effect.ensuring(forget(session)),
             Effect.asVoid,
             Effect.mapError(
               (cause) =>
@@ -372,8 +439,9 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
       return ready;
     });
 
-  const stopAll = Effect.suspend(() =>
-    sessions.size === 0
+  const stopAll = Effect.suspend(() => {
+    epoch++;
+    return sessions.size === 0
       ? Effect.void
       : api.pipe(
           Effect.flatMap((expo) =>
@@ -381,15 +449,15 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
               [...sessions.values()],
               (session) =>
                 stopSession(expo, session.sessionId).pipe(
-                  Effect.andThen(Effect.sync(() => sessions.delete(session.udid))),
+                  Effect.ensuring(forget(session)),
                   Effect.ignore,
                 ),
               { discard: true, concurrency: 4 },
             ),
           ),
           Effect.ignore,
-        ),
-  );
+        );
+  });
   yield* Effect.addFinalizer(() => stopAll);
 
   const platformAvailability = (platform: DevicePlatform) =>
