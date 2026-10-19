@@ -281,6 +281,7 @@ import {
   DeviceListInput,
   SshDeviceHostConfig,
   DeviceEasAccount,
+  DeviceEasAccountError,
   DeviceEasAccountInput,
   DeviceHostSummary,
   DeviceOpenInput,
@@ -1552,7 +1553,7 @@ const WsDeviceTestHostRpc = Rpc.make(WS_METHODS.deviceTestHost, {
 const WsDeviceEasAccountRpc = Rpc.make(WS_METHODS.deviceEasAccount, {
   payload: DeviceEasAccountInput,
   success: DeviceEasAccount,
-  error: Schema.Union([DeviceError, EnvironmentAuthorizationError]),
+  error: Schema.Union([DeviceEasAccountError, EnvironmentAuthorizationError]),
 });
 
 const WsDeviceListRpc = Rpc.make(WS_METHODS.deviceList, {

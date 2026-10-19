@@ -18,6 +18,7 @@ import {
   type DeviceShutdownInput,
   type DeviceSummary,
   type DeviceEasAccount,
+  DeviceEasAccountError,
   type DeviceEasAccountInput,
   type DeviceHostConfig,
   type EasDeviceHostConfig,
@@ -110,7 +111,7 @@ export class DeviceService extends Context.Service<
     /** Who an Expo credential signs in as and which EAS projects it can run sessions under. */
     readonly easAccount: (
       input: DeviceEasAccountInput,
-    ) => Effect.Effect<DeviceEasAccount, DeviceError>;
+    ) => Effect.Effect<DeviceEasAccount, DeviceEasAccountError>;
     /**
      * The agent-device flags that reach the device: its config and session,
      * and the id agent-device selects it by, which can differ from its id here.
@@ -814,8 +815,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       inspect,
       easAccount: (input) =>
         Effect.fail(
-          new DeviceHostUnavailableError({
-            hostId: input.hostId ?? "eas",
+          new DeviceEasAccountError({
             reason: "EAS accounts are unavailable in this device service.",
           }),
         ),
@@ -1104,14 +1104,7 @@ export const make = Effect.gen(function* () {
       return { signedInAs: viewer.name, credentialSource: credential.source, apps: viewer.apps };
     }).pipe(
       Effect.provide(easContext),
-      Effect.mapError(
-        (cause) =>
-          new DeviceHostUnavailableError({
-            hostId: input.hostId ?? "eas",
-            reason: cause.message,
-            cause,
-          }),
-      ),
+      Effect.mapError((cause) => new DeviceEasAccountError({ reason: cause.message, cause })),
       Effect.withSpan("DeviceService.easAccount"),
     );
 

@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { useEffect, useEffectEvent, useId, useState } from "react";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import {
@@ -200,6 +200,13 @@ function EasDeviceHostEditor(props: {
     );
   };
 
+  // Checking on open names the saved project and shows a rejected credential
+  // before anything is changed.
+  const checkOnOpen = useEffectEvent(() => void checkAccount());
+  useEffect(() => {
+    checkOnOpen();
+  }, []);
+
   const limit = (
     field: "maxSessionMinutes" | "idleMinutes" | "maxConcurrentSessions",
     label: string,
@@ -297,7 +304,9 @@ function EasDeviceHostEditor(props: {
                   ? `Signed in as ${account.account.signedInAs} with ${CREDENTIAL_SOURCES[account.account.credentialSource]}.`
                   : account.status === "failed"
                     ? account.error
-                    : "Check the Expo account before choosing a project."}
+                    : account.status === "checking"
+                      ? "Checking the Expo account…"
+                      : "Check the Expo account before choosing a project."}
               </p>
               <Button
                 type="button"

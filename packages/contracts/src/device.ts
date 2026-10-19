@@ -97,6 +97,19 @@ export const DeviceEasAccount = Schema.Struct({
 });
 export type DeviceEasAccount = typeof DeviceEasAccount.Type;
 
+/** Checking an Expo credential failed; no device host is involved yet. */
+export class DeviceEasAccountError extends Schema.TaggedError<DeviceEasAccountError>()(
+  "DeviceEasAccountError",
+  {
+    reason: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return this.reason;
+  }
+}
+
 export const DeviceId = TrimmedNonEmptyString.check(Schema.isMaxLength(256));
 export type DeviceId = typeof DeviceId.Type;
 
