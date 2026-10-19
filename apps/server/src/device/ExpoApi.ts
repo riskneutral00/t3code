@@ -1,16 +1,27 @@
 /**
- * Expo's GraphQL API for EAS Simulator sessions. The operations are the ones
- * eas-cli's hidden `simulator:*` commands use; Expo has no public schema for
- * them, so responses are decoded here instead of generated from SDL.
+ * Expo's GraphQL API for EAS Simulator sessions. The operations in
+ * `ExpoApi.graphql` are the ones eas-cli's `simulator:*` commands send; their
+ * client is generated from `schema/expo.graphql` (`vp run generate`).
  */
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import {
+  GraphQLClient,
+  GraphQLClientError,
+  GraphQLMiddleware,
+  GraphQLProtocol,
+} from "effect/graphql";
+import { HttpClient } from "effect/http";
+import * as Headers from "effect/http/Headers";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+
+import { ExpoApiGraphQLGroup, type T3EasSimulatorSession } from "./ExpoApi.graphql.ts";
+import type { DeviceRunSessionStatus } from "../../schema/expo.graphql.ts";
 
 const EXPO_GRAPHQL_URL = "https://api.expo.dev/graphql";
 const REQUEST_TIMEOUT = "30 seconds";
@@ -88,28 +99,7 @@ export const resolveExpoCredential = Effect.fn("ExpoApi.resolveExpoCredential")(
   } satisfies ExpoCredential;
 });
 
-const SessionStatus = Schema.Literals([
-  "NEW",
-  "QUEUED",
-  "STARTING",
-  "IN_PROGRESS",
-  "STOPPED",
-  "ERRORED",
-]);
-export type EasSessionStatus = typeof SessionStatus.Type;
-
-const RemoteConfig = Schema.Struct({
-  agentDeviceRemoteSessionUrl: Schema.String,
-  agentDeviceRemoteSessionToken: Schema.String,
-  webPreviewToken: Schema.NullOr(Schema.String),
-  previewApiUrl: Schema.NullOr(Schema.String),
-});
-
-const Session = Schema.Struct({
-  id: Schema.String,
-  status: SessionStatus,
-  remoteConfig: Schema.NullOr(Schema.Union([RemoteConfig, Schema.Struct({})])),
-});
+export type EasSessionStatus = DeviceRunSessionStatus;
 
 export interface EasSession {
   readonly id: string;
@@ -134,207 +124,150 @@ export interface CreateEasSessionInput {
   readonly maxIdleTimeMinutes: number;
 }
 
-const QUERIES = {
-  viewer: `query T3ExpoViewer {
-  meActor {
-    __typename
-    ... on UserActor { username }
-    ... on Robot { firstName }
-    accounts { name appsPaginated(first: 100) { edges { node { id fullName } } } }
-  }
-}`,
-  availability: `query T3EasSimulatorAvailability($appId: String!, $filter: [String!]) {
-  app { byId(appId: $appId) { ownerAccount { name accountFeatureGates(filter: $filter) } } }
-}`,
-  create: `mutation T3CreateEasSimulatorSession($input: CreateDeviceRunSessionInput!) {
-  deviceRunSession { createDeviceRunSession(deviceRunSessionInput: $input) { id } }
-}`,
-  session: `query T3EasSimulatorSession($id: ID!) {
-  deviceRunSessions {
-    byId(deviceRunSessionId: $id) {
-      id
-      status
-      remoteConfig {
-        ... on AgentDeviceRunSessionRemoteConfig {
-          agentDeviceRemoteSessionUrl
-          agentDeviceRemoteSessionToken
-          webPreviewToken
-          previewApiUrl
-        }
-      }
-    }
-  }
-}`,
-  activeSessions: `query T3ActiveEasSimulatorSessions($appId: String!, $filter: DeviceRunSessionFilterInput) {
-  app { byId(appId: $appId) { deviceRunSessionsPaginated(first: 50, filter: $filter) { edges { node { id status name } } } } }
-}`,
-  stop: `mutation T3StopEasSimulatorSession($id: ID!) {
-  deviceRunSession { ensureDeviceRunSessionStopped(deviceRunSessionId: $id) { id status } }
-}`,
-} as const;
-
-const ViewerData = Schema.Struct({
-  meActor: Schema.Struct({
-    __typename: Schema.String,
-    username: Schema.optional(Schema.String),
-    firstName: Schema.optional(Schema.NullOr(Schema.String)),
-    accounts: Schema.Array(
-      Schema.Struct({
-        name: Schema.String,
-        appsPaginated: Schema.Struct({
-          edges: Schema.Array(
-            Schema.Struct({ node: Schema.Struct({ id: Schema.String, fullName: Schema.String }) }),
-          ),
-        }),
-      }),
-    ),
-  }),
-});
-const AvailabilityData = Schema.Struct({
-  app: Schema.Struct({
-    byId: Schema.Struct({
-      ownerAccount: Schema.Struct({
-        name: Schema.String,
-        accountFeatureGates: Schema.Record(Schema.String, Schema.Boolean),
-      }),
-    }),
-  }),
-});
-const CreateData = Schema.Struct({
-  deviceRunSession: Schema.Struct({ createDeviceRunSession: Schema.Struct({ id: Schema.String }) }),
-});
-const SessionData = Schema.Struct({ deviceRunSessions: Schema.Struct({ byId: Session }) });
-const ActiveSessionsData = Schema.Struct({
-  app: Schema.Struct({
-    byId: Schema.Struct({
-      deviceRunSessionsPaginated: Schema.Struct({
-        edges: Schema.Array(
-          Schema.Struct({
-            node: Schema.Struct({
-              id: Schema.String,
-              status: SessionStatus,
-              name: Schema.NullOr(Schema.String),
-            }),
-          }),
-        ),
-      }),
-    }),
-  }),
-});
-const StopData = Schema.Struct({
-  deviceRunSession: Schema.Struct({
-    ensureDeviceRunSessionStopped: Schema.Struct({ id: Schema.String, status: SessionStatus }),
-  }),
-});
-
-const GraphQlResponse = Schema.Struct({
-  data: Schema.optional(Schema.Unknown),
-  errors: Schema.optional(Schema.Array(Schema.Struct({ message: Schema.String }))),
-});
-
 const DEVICE_RUN_SESSIONS_GATE = "device-run-sessions";
+const isFeatureGates = Schema.is(Schema.Record(Schema.String, Schema.Unknown));
+
+/** Sends every operation with the resolved credential. */
+class ExpoAuth extends GraphQLMiddleware.Service<ExpoAuth>()("t3/server/device/ExpoApi/ExpoAuth") {}
+
+const ExpoGroup = ExpoApiGraphQLGroup.middleware(ExpoAuth);
+
+/**
+ * Expo's answer as an `ExpoApiError`. A transport error's cause holds the
+ * request with its credential header. `httpObservability` redacts that header
+ * where the server renders headers, but these errors also travel to clients
+ * as RPC defects, so the cause is dropped.
+ */
+const toExpoApiError = (
+  operation: string,
+  credential: ExpoCredential,
+  error: GraphQLClientError.GraphQLClientError,
+): ExpoApiError => {
+  const failure = (detail: string, cause?: unknown) =>
+    new ExpoApiError({ operation, detail, ...(cause === undefined ? {} : { cause }) });
+  const reason = error.reason;
+  const status =
+    reason._tag === "TransportError" || reason._tag === "ResponseError" ? reason.status : undefined;
+  if (status === 401 || status === 403) {
+    const what = credential.source === "eas-login" ? "eas login session" : "access token";
+    return failure(`the ${what} was rejected (HTTP ${status})`);
+  }
+  switch (reason._tag) {
+    case "ResponseError":
+      return failure(reason.errors.map((graphQlError) => graphQlError.message).join("; "));
+    case "TransportError":
+      return failure(
+        status === undefined ? "Expo's API is unreachable" : `unexpected response (HTTP ${status})`,
+      );
+    case "EncodeError":
+      return failure("the request could not be encoded");
+    default:
+      return failure("unexpected response", reason);
+  }
+};
+
+const toSession = (
+  session: T3EasSimulatorSession.Result["deviceRunSessions"]["byId"],
+): EasSession => {
+  const remote = session.remoteConfig;
+  return {
+    id: session.id,
+    status: session.status,
+    endpoints:
+      remote?.__typename === "AgentDeviceRunSessionRemoteConfig"
+        ? {
+            agentDevice: {
+              url: remote.agentDeviceRemoteSessionUrl,
+              token: Redacted.make(remote.agentDeviceRemoteSessionToken),
+            },
+            preview:
+              remote.previewApiUrl && remote.webPreviewToken
+                ? { url: remote.previewApiUrl, token: Redacted.make(remote.webPreviewToken) }
+                : null,
+          }
+        : null,
+  };
+};
 
 /** Typed calls against Expo's API with one resolved credential. */
 export const makeExpoApi = (http: HttpClient.HttpClient, credential: ExpoCredential) => {
-  const client = http.pipe(HttpClient.withScope);
-  const call = <A, I>(
-    operation: string,
-    query: string,
-    variables: Record<string, unknown>,
-    data: Schema.Codec<A, I>,
-  ) => {
-    const failure = (detail?: string, cause?: unknown) =>
-      new ExpoApiError({
-        operation,
-        ...(detail === undefined ? {} : { detail }),
-        ...(cause === undefined ? {} : { cause }),
-      });
-    return Effect.gen(function* () {
-      const request = yield* HttpClientRequest.post(EXPO_GRAPHQL_URL).pipe(
-        HttpClientRequest.setHeader(
-          credential.header.name,
-          Redacted.value(credential.header.value),
+  const client = GraphQLClient.make(ExpoGroup).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.succeed(
+          ExpoAuth,
+          GraphQLMiddleware.mapRequest((request) =>
+            Effect.succeed({
+              ...request,
+              headers: Headers.set(
+                request.headers,
+                credential.header.name,
+                Redacted.value(credential.header.value),
+              ),
+            }),
+          ),
         ),
-        HttpClientRequest.bodyJson({ query, variables }),
-        // HTTP errors hold the request, whose credential header must not reach logs.
-        Effect.mapError(() => failure("the request could not be encoded")),
-      );
-      const response = yield* client
-        .execute(request)
-        .pipe(
-          Effect.mapError((error) => failure(`Expo's API is unreachable (${error.reason._tag})`)),
-        );
-      if (response.status === 401 || response.status === 403) {
-        const what = credential.source === "eas-login" ? "eas login session" : "access token";
-        return yield* failure(`the ${what} was rejected (HTTP ${response.status})`);
-      }
-      const body = yield* HttpClientResponse.schemaBodyJson(GraphQlResponse)(response).pipe(
-        Effect.mapError(() => failure(`unexpected response (HTTP ${response.status})`)),
-      );
-      if (body.errors?.length) {
-        return yield* failure(body.errors.map((error) => error.message).join("; "));
-      }
-      return yield* Schema.decodeUnknownEffect(data)(body.data).pipe(
-        Effect.mapError((cause) => failure("unexpected response", cause)),
-      );
-    }).pipe(
-      Effect.scoped,
+        GraphQLProtocol.layerHttp({ url: EXPO_GRAPHQL_URL }).pipe(
+          Layer.provide(Layer.succeed(HttpClient.HttpClient, http)),
+        ),
+      ),
+    ),
+  );
+  const call = <A>(
+    operation: string,
+    run: (
+      client: GraphQLClient.FromGroup<typeof ExpoGroup>,
+    ) => Effect.Effect<A, GraphQLClientError.GraphQLClientError>,
+  ) =>
+    Effect.flatMap(client, run).pipe(
+      Effect.mapError((error) => toExpoApiError(operation, credential, error)),
       Effect.timeoutOrElse({
         duration: REQUEST_TIMEOUT,
-        orElse: () => Effect.fail(failure("Expo's API did not answer in time")),
+        orElse: () =>
+          Effect.fail(new ExpoApiError({ operation, detail: "Expo's API did not answer in time" })),
       }),
       Effect.withSpan(`ExpoApi.${operation}`),
     );
-  };
-
-  const toSession = (session: typeof Session.Type): EasSession => {
-    const remote = session.remoteConfig;
-    return {
-      id: session.id,
-      status: session.status,
-      endpoints:
-        remote && "agentDeviceRemoteSessionUrl" in remote
-          ? {
-              agentDevice: {
-                url: remote.agentDeviceRemoteSessionUrl,
-                token: Redacted.make(remote.agentDeviceRemoteSessionToken),
-              },
-              preview:
-                remote.previewApiUrl && remote.webPreviewToken
-                  ? { url: remote.previewApiUrl, token: Redacted.make(remote.webPreviewToken) }
-                  : null,
-            }
-          : null,
-    };
-  };
 
   return {
     credential,
-    viewer: call("read the signed-in account", QUERIES.viewer, {}, ViewerData).pipe(
-      Effect.map(({ meActor }) => ({
-        name: meActor.username ?? meActor.firstName ?? meActor.__typename,
-        apps: meActor.accounts.flatMap((account) =>
-          account.appsPaginated.edges.map(({ node }): EasApp => node),
-        ),
-      })),
+    viewer: call("read the signed-in account", (expo) => expo.T3ExpoViewer()).pipe(
+      Effect.flatMap(({ meActor }) =>
+        meActor === null
+          ? Effect.fail(
+              new ExpoApiError({
+                operation: "read the signed-in account",
+                detail: "no account is signed in",
+              }),
+            )
+          : Effect.succeed({
+              name:
+                "username" in meActor
+                  ? meActor.username
+                  : "firstName" in meActor
+                    ? (meActor.firstName ?? meActor.__typename)
+                    : meActor.__typename,
+              apps: meActor.accounts.flatMap((account) =>
+                account.appsPaginated.edges.map(({ node }): EasApp => node),
+              ),
+            }),
+      ),
     ),
     availability: (appId: string) =>
-      call(
-        "check EAS Simulator access",
-        QUERIES.availability,
-        { appId, filter: [DEVICE_RUN_SESSIONS_GATE] },
-        AvailabilityData,
+      call("check EAS Simulator access", (expo) =>
+        expo.T3EasSimulatorAvailability({ appId, filter: [DEVICE_RUN_SESSIONS_GATE] }),
       ).pipe(
-        Effect.map(({ app }) => ({
-          account: app.byId.ownerAccount.name,
-          available: app.byId.ownerAccount.accountFeatureGates[DEVICE_RUN_SESSIONS_GATE] === true,
-        })),
+        Effect.map(({ app }) => {
+          const gates = app.byId.ownerAccount.accountFeatureGates;
+          return {
+            account: app.byId.ownerAccount.name,
+            available: isFeatureGates(gates) && gates[DEVICE_RUN_SESSIONS_GATE] === true,
+          };
+        }),
       ),
     create: (input: CreateEasSessionInput) =>
-      call(
-        "start a simulator session",
-        QUERIES.create,
-        {
+      call("start a simulator session", (expo) =>
+        expo.T3CreateEasSimulatorSession({
           input: {
             appId: input.appId,
             platform: input.platform === "ios" ? "IOS" : "ANDROID",
@@ -345,24 +278,23 @@ export const makeExpoApi = (http: HttpClient.HttpClient, credential: ExpoCredent
             // Expo only issues the preview host's API URL when preview access is configured.
             corsOrigins: ["http://localhost"],
           },
-        },
-        CreateData,
+        }),
       ).pipe(Effect.map(({ deviceRunSession }) => deviceRunSession.createDeviceRunSession.id)),
     session: (id: string) =>
-      call("read a simulator session", QUERIES.session, { id }, SessionData).pipe(
+      call("read a simulator session", (expo) => expo.T3EasSimulatorSession({ id })).pipe(
         Effect.map(({ deviceRunSessions }) => toSession(deviceRunSessions.byId)),
       ),
     activeSessions: (appId: string) =>
-      call(
-        "list simulator sessions",
-        QUERIES.activeSessions,
-        { appId, filter: { statuses: ["NEW", "QUEUED", "STARTING", "IN_PROGRESS"] } },
-        ActiveSessionsData,
+      call("list simulator sessions", (expo) =>
+        expo.T3ActiveEasSimulatorSessions({
+          appId,
+          filter: { statuses: ["NEW", "QUEUED", "STARTING", "IN_PROGRESS"] },
+        }),
       ).pipe(
         Effect.map(({ app }) => app.byId.deviceRunSessionsPaginated.edges.map(({ node }) => node)),
       ),
     stop: (id: string) =>
-      call("stop a simulator session", QUERIES.stop, { id }, StopData).pipe(
+      call("stop a simulator session", (expo) => expo.T3StopEasSimulatorSession({ id })).pipe(
         Effect.map(({ deviceRunSession }) => deviceRunSession.ensureDeviceRunSessionStopped.status),
       ),
   };

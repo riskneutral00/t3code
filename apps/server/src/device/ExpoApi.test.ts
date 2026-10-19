@@ -83,6 +83,7 @@ describe("Expo API", () => {
                     id: "session-1",
                     status: "IN_PROGRESS",
                     remoteConfig: {
+                      __typename: "AgentDeviceRunSessionRemoteConfig",
                       agentDeviceRemoteSessionUrl: "https://agent.test",
                       agentDeviceRemoteSessionToken: "agent-token",
                       webPreviewToken: "preview-token",
