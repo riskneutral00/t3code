@@ -48,11 +48,14 @@ const fakeExpo = (
     readonly active?: ReadonlyArray<{ id: string; status: string; name: string }>;
     readonly previewGate?: Gate;
     readonly createGate?: Gate;
+    readonly activeIncludesCreated?: boolean;
+    readonly failPreview?: boolean;
   } = {},
 ) => {
   const calls: Array<{ operation: string; variables: Record<string, unknown> }> = [];
   let created = 0;
   let createdName = "";
+  let previewFails = options.failPreview ?? false;
   const http = HttpClient.make((request) =>
     Effect.gen(function* () {
       const url = new URL(request.url);
@@ -61,6 +64,9 @@ const fakeExpo = (
         if (options.previewGate) {
           yield* Deferred.succeed(options.previewGate.requested, undefined);
           yield* Deferred.await(options.previewGate.release);
+        }
+        if (previewFails) {
+          return HttpClientResponse.fromWeb(request, new Response("bad gateway", { status: 502 }));
         }
         return HttpClientResponse.fromWeb(request, Response.json({ device: "UDID-1" }));
       }
@@ -115,6 +121,17 @@ const fakeExpo = (
                             },
                           },
                           ...(options.active ?? []).map((node) => ({ node })),
+                          ...(options.activeIncludesCreated && created > 0
+                            ? [
+                                {
+                                  node: {
+                                    id: `session-${created}`,
+                                    status: "STARTING",
+                                    name: createdName,
+                                  },
+                                },
+                              ]
+                            : []),
                         ],
                       },
                     },
@@ -146,7 +163,10 @@ const fakeExpo = (
   );
   const named = (operation: string) => calls.filter((call) => call.operation === operation);
   const stopped = () => named("T3StopEasSimulatorSession").map((call) => call.variables.id);
-  return { http, named, stopped };
+  const allowPreview = () => {
+    previewFails = false;
+  };
+  return { http, named, stopped, allowPreview };
 };
 
 const layer = Layer.mergeAll(
@@ -274,8 +294,11 @@ describe("EAS Simulator host", () => {
       yield* fs.writeFileString(
         ledger,
         JSON.stringify([
-          { name: "T3 Code · EAS Simulator · left", appId: APP_ID },
-          { name: "T3 Code · EAS Simulator · gone", appId: APP_ID },
+          { name: "T3 Code · EAS Simulator · left", appId: APP_ID, recordedAt: 0 },
+          // Recorded long enough ago that Expo has ended it, so the record goes.
+          { name: "T3 Code · EAS Simulator · gone", appId: APP_ID, recordedAt: -121 * 60_000 },
+          // Recorded just now and not listed yet: kept for a later sweep.
+          { name: "T3 Code · EAS Simulator · new", appId: APP_ID, recordedAt: 0 },
         ]),
       );
       const expo = fakeExpo({
@@ -286,7 +309,9 @@ describe("EAS Simulator host", () => {
       const host = yield* makeHost(expo, config(), yield* Scope.make());
       yield* host.ensureReady(() => Effect.void);
       expect(expo.stopped()).toEqual(["left-behind"]);
-      expect(JSON.parse(yield* fs.readFileString(ledger))).toEqual([]);
+      expect(
+        JSON.parse(yield* fs.readFileString(ledger)).map((entry: { name: string }) => entry.name),
+      ).toEqual(["T3 Code · EAS Simulator · new"]);
     }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 
@@ -383,24 +408,65 @@ describe("EAS Simulator host", () => {
     }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 
-  it.effect("stops a session that finishes starting after the host stopped", () =>
+  it.effect("stops a session that is still starting when the host stops", () =>
     Effect.gen(function* () {
-      const previewGate = {
-        requested: yield* Deferred.make<void>(),
-        release: yield* Deferred.make<void>(),
-      };
+      const previewGate = yield* makeGate;
       const expo = fakeExpo({ previewGate });
       const host = yield* makeHost(expo, config(), yield* Scope.make());
       const ready = yield* host.ensureReady(() => Effect.void);
       const [catalogDevice] = (yield* ready.devices.list).devices;
       const booting = yield* ready.devices.boot(catalogDevice!).pipe(Effect.forkChild);
       yield* Deferred.await(previewGate.requested);
+      // Never released: stopping must not wait for the session to become ready.
       yield* host.stop;
-      yield* Deferred.succeed(previewGate.release, undefined);
-      const failure = yield* Fiber.join(booting).pipe(Effect.flip);
-      expect(failure.message).toContain("was stopped while the session started");
       expect(expo.stopped()).toEqual(["session-1"]);
+      expect(Exit.isFailure(yield* Fiber.await(booting))).toBe(true);
       expect((yield* ready.devices.list).devices.map((device) => device.id)).toEqual(["eas-ios"]);
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+
+  it.effect("leaves a start in progress to its owner when the sweep runs", () =>
+    Effect.gen(function* () {
+      const previewGate = yield* makeGate;
+      // Expo lists the starting session by name, as it does while it boots.
+      const expo = fakeExpo({ previewGate, activeIncludesCreated: true });
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const server = yield* ServerConfig.ServerConfig;
+      const host = yield* makeHost(expo, config(), yield* Scope.make());
+      const ready = yield* host.ensureReady(() => Effect.void);
+      const [catalogDevice] = (yield* ready.devices.list).devices;
+      const booting = yield* ready.devices.boot(catalogDevice!).pipe(Effect.forkChild);
+      yield* Deferred.await(previewGate.requested);
+      yield* TestClock.adjust("61 seconds");
+      yield* ready.devices.list;
+      expect(expo.stopped()).toEqual([]);
+      const ledger = path.join(server.stateDir, "device", "eas", "eas.json");
+      expect(JSON.parse(yield* fs.readFileString(ledger))).toHaveLength(1);
+      yield* Deferred.succeed(previewGate.release, undefined);
+      expect(yield* Fiber.join(booting)).toBe("session-1");
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+
+  it.effect("keeps a session counted when its start fails and stopping it fails too", () =>
+    Effect.gen(function* () {
+      let stopFails = true;
+      const expo = fakeExpo({ failPreview: true, failStop: () => stopFails });
+      const host = yield* makeHost(expo, config({ maxConcurrentSessions: 1 }), yield* Scope.make());
+      const ready = yield* host.ensureReady(() => Effect.void);
+      const [catalogDevice] = (yield* ready.devices.list).devices;
+      // The preview probe is retried a few seconds apart before the start gives up.
+      const failing = yield* ready.devices.boot(catalogDevice!).pipe(Effect.flip, Effect.forkChild);
+      while (failing.pollUnsafe() === undefined) yield* TestClock.adjust("1 second");
+      yield* Fiber.join(failing);
+      const refused = yield* ready.devices.boot(catalogDevice!).pipe(Effect.flip);
+      expect(refused.message).toContain("limited to 1 running session");
+      expect(expo.named("T3CreateEasSimulatorSession")).toHaveLength(1);
+      stopFails = false;
+      yield* ready.devices.list;
+      expect(expo.stopped().at(-1)).toBe("session-1");
+      expo.allowPreview();
+      expect(yield* ready.devices.boot(catalogDevice!)).toBe("session-2");
     }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 
