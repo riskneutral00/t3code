@@ -110,6 +110,7 @@ const fakeExpo = (
                         id: body.variables.id,
                         status: options.status?.() ?? "IN_PROGRESS",
                         remoteConfig: {
+                          __typename: "AgentDeviceRunSessionRemoteConfig",
                           agentDeviceRemoteSessionUrl: "https://agent.test",
                           agentDeviceRemoteSessionToken: "agent-token",
                           webPreviewToken: "preview-token",
