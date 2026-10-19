@@ -86,7 +86,7 @@ describe("serverSettings helpers", () => {
     });
   });
   it("replaces SSH host lists when saving, editing, and removing hosts", () => {
-    const host = { id: "mini", label: "Mac mini", target: "mini" };
+    const host = { kind: "ssh" as const, id: "mini", label: "Mac mini", target: "mini" };
     const saved = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, { deviceHosts: [host] });
     expect(saved.deviceHosts).toEqual([host]);
     const replacement = { ...host, target: "other-mini" };
