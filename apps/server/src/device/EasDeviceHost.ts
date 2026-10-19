@@ -85,7 +85,12 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
   let ready: DeviceHost.DeviceHostReady | null = null;
 
   const unavailable = (reason: string, cause?: unknown) =>
-    new DeviceHostUnavailableError({ hostId, reason, ...(cause === undefined ? {} : { cause }) });
+    new DeviceHostUnavailableError({
+      hostId,
+      hostLabel: config.label,
+      reason,
+      ...(cause === undefined ? {} : { cause }),
+    });
 
   const api: Effect.Effect<ExpoApi, DeviceHostUnavailableError> = resolveExpoCredential(
     config.accessToken,
@@ -500,6 +505,7 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
 
   return DeviceHost.DeviceHost.of({
     id: hostId,
+    label: config.label,
     summary,
     platformAvailability,
     ensureReady,

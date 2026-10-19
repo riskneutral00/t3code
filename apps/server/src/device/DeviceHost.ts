@@ -152,6 +152,8 @@ export class DeviceHost extends Context.Service<
   DeviceHost,
   {
     readonly id: DeviceHostId;
+    /** The name errors and the Device panel show for this host. */
+    readonly label: string;
     readonly summary: Effect.Effect<DeviceHostSummary>;
     readonly inspect?: Effect.Effect<DeviceHostSummary, DeviceHostError>;
     readonly platformAvailability: (
