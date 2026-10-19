@@ -45,6 +45,41 @@ export class ExpoNotSignedInError extends Schema.TaggedError<ExpoNotSignedInErro
   }
 }
 
+const CREDENTIAL_SOURCE_NAMES: Record<ExpoCredentialSource, string> = {
+  settings: "The access token saved for this host",
+  env: "EXPO_TOKEN",
+  "eas-login": "The eas login session",
+};
+
+export class ExpoInvalidCredentialError extends Schema.TaggedError<ExpoInvalidCredentialError>()(
+  "ExpoInvalidCredentialError",
+  { source: Schema.Literals(["settings", "env", "eas-login"]) },
+) {
+  override get message(): string {
+    return `${CREDENTIAL_SOURCE_NAMES[this.source]} is not a usable Expo credential. Replace it.`;
+  }
+}
+
+/**
+ * Expo credentials are printable ASCII. Anything else (the redacted
+ * placeholder, a pasted newline) would fail inside fetch with the header
+ * value in its message, so it is refused here.
+ */
+const credential = (
+  source: ExpoCredentialSource,
+  header: ExpoCredential["header"]["name"],
+  value: string,
+) =>
+  /^[\x21-\x7e]+$/.test(value)
+    ? Effect.succeed({
+        source,
+        header: {
+          name: header,
+          value: Redacted.make(header === "authorization" ? `Bearer ${value}` : value),
+        },
+      } satisfies ExpoCredential)
+    : Effect.fail(new ExpoInvalidCredentialError({ source }));
+
 export class ExpoApiError extends Schema.TaggedError<ExpoApiError>()("ExpoApiError", {
   operation: Schema.String,
   detail: Schema.optional(Schema.String),
@@ -72,19 +107,9 @@ export const resolveExpoCredential = Effect.fn("ExpoApi.resolveExpoCredential")(
   savedToken: string,
 ) {
   const saved = savedToken.trim();
-  if (saved !== "") {
-    return {
-      source: "settings",
-      header: { name: "authorization", value: Redacted.make(`Bearer ${saved}`) },
-    } satisfies ExpoCredential;
-  }
+  if (saved !== "") return yield* credential("settings", "authorization", saved);
   const fromEnv = (yield* HostProcess.Environment).EXPO_TOKEN?.trim();
-  if (fromEnv) {
-    return {
-      source: "env",
-      header: { name: "authorization", value: Redacted.make(`Bearer ${fromEnv}`) },
-    } satisfies ExpoCredential;
-  }
+  if (fromEnv) return yield* credential("env", "authorization", fromEnv);
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const statePath = path.join(yield* HostProcess.HomeDirectory, ".expo", "state.json");
@@ -93,10 +118,7 @@ export const resolveExpoCredential = Effect.fn("ExpoApi.resolveExpoCredential")(
     Option.flatMap((value) => Option.fromNullishOr(value.auth?.sessionSecret?.trim() || null)),
   );
   if (Option.isNone(secret)) return yield* new ExpoNotSignedInError();
-  return {
-    source: "eas-login",
-    header: { name: "expo-session", value: Redacted.make(secret.value) },
-  } satisfies ExpoCredential;
+  return yield* credential("eas-login", "expo-session", secret.value);
 });
 
 export type EasSessionStatus = DeviceRunSessionStatus;
@@ -143,8 +165,7 @@ const toExpoApiError = (
   credential: ExpoCredential,
   error: GraphQLClientError.GraphQLClientError,
 ): ExpoApiError => {
-  const failure = (detail: string, cause?: unknown) =>
-    new ExpoApiError({ operation, detail, ...(cause === undefined ? {} : { cause }) });
+  const failure = (detail: string) => new ExpoApiError({ operation, detail });
   const reason = error.reason;
   const status =
     reason._tag === "TransportError" || reason._tag === "ResponseError" ? reason.status : undefined;
@@ -162,7 +183,8 @@ const toExpoApiError = (
     case "EncodeError":
       return failure("the request could not be encoded");
     default:
-      return failure("unexpected response", reason);
+      // A decode error can quote the answer, session tokens included.
+      return failure("unexpected response");
   }
 };
 

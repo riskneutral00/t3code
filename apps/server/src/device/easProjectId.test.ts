@@ -2,11 +2,9 @@ import { expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
-import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 
-import * as ProcessRunner from "../processRunner.ts";
 import { findEasProjectId } from "./easProjectId.ts";
 
 const ID_A = "d763fcb8-d37c-41ea-a773-b54a0ab4a454";
@@ -24,34 +22,37 @@ const workspace = (files: Record<string, string>) =>
     return root;
   });
 
-const layer = ProcessRunner.layer.pipe(Layer.provideMerge(NodeServices.layer));
+const layer = NodeServices.layer;
 
-it.effect("evaluates a TypeScript app config in a monorepo app without its dependencies", () =>
+it.effect("reads a literal project id from an app config without running it", () =>
   Effect.gen(function* () {
-    const root = yield* workspace({
-      "apps/mobile/app.config.ts": `
-        import type { ExpoConfig } from "expo/config";
-        const parts: string[] = ${JSON.stringify(ID_A.split("-"))};
-        export default ({ config }: { config: ExpoConfig }): ExpoConfig => ({
-          ...config,
-          extra: { eas: { projectId: parts.join("-") } },
-        });`,
-      "apps/mobile/app.json": JSON.stringify({ expo: { name: "Mobile", slug: "mobile" } }),
-    });
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* workspace({});
+    const marker = path.join(root, "config-ran");
+    yield* fs.makeDirectory(path.join(root, "apps/mobile"), { recursive: true });
+    yield* fs.writeFileString(
+      path.join(root, "apps/mobile/app.config.ts"),
+      `import { writeFileSync } from "node:fs";
+      writeFileSync(${JSON.stringify(marker)}, "");
+      export default { extra: { eas: { projectId: "${ID_A}" } } };`,
+    );
     expect(yield* findEasProjectId(root)).toEqual(Option.some(ID_A));
+    expect(yield* fs.exists(marker)).toBe(false);
   }).pipe(Effect.scoped, Effect.provide(layer)),
 );
 
-it.effect("falls back to a literal project id when the config cannot run, and to app.json", () =>
+it.effect("falls back to app.json, and does not compute a project id a config builds", () =>
   Effect.gen(function* () {
-    const unrunnable = yield* workspace({
-      "app.config.js": `import missing from "not-installed";\nexport default { extra: { eas: { projectId: "${ID_A}" } } };`,
-    });
-    expect(yield* findEasProjectId(unrunnable)).toEqual(Option.some(ID_A));
     const staticOnly = yield* workspace({
       "app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_B } } } }),
     });
     expect(yield* findEasProjectId(staticOnly)).toEqual(Option.some(ID_B));
+    const computed = yield* workspace({
+      "app.config.ts": `const parts = ${JSON.stringify(ID_A.split("-"))};
+        export default { extra: { eas: { projectId: parts.join("-") } } };`,
+    });
+    expect(yield* findEasProjectId(computed)).toEqual(Option.none());
   }).pipe(Effect.scoped, Effect.provide(layer)),
 );
 

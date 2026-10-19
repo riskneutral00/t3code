@@ -56,6 +56,21 @@ describe("Expo credentials", () => {
       expect(Exit.isFailure(missing) && missing.cause.toString()).toContain("eas login");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
+
+  it.effect.each([
+    { case: "the redacted placeholder", saved: "\u2022\u2022\u2022\u2022\u2022\u2022", env: {} },
+    { case: "a pasted newline", saved: "abc\ndef", env: {} },
+    { case: "a malformed EXPO_TOKEN", saved: "", env: { EXPO_TOKEN: "abc def" } },
+  ])("refuses $case without echoing it", ({ saved, env }) =>
+    Effect.gen(function* () {
+      const error = yield* resolveExpoCredential(saved).pipe(
+        Effect.provideService(HostProcess.Environment, env),
+        Effect.flip,
+      );
+      expect(error._tag).toBe("ExpoInvalidCredentialError");
+      expect(error.message).not.toContain(saved || "abc def");
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 });
 
 describe("Expo API", () => {
