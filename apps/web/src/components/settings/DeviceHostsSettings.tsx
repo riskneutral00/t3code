@@ -32,7 +32,6 @@ import { useSettingsScope } from "./SettingsScopeContext";
 import { toastManager } from "../ui/toast";
 import {
   groupDeviceHosts,
-  sshDeviceHosts,
   updateDeviceHosts,
   type DeviceHostEnvironment,
   type DeviceHostGroup,
@@ -62,7 +61,7 @@ export function DeviceHostsSettings(props: { environmentId: EnvironmentId | null
     environmentId: environment.environmentId,
     label: environment.label,
     labels: settingsScopeEnvironmentLabels(environment, connectedEnvironments),
-    hosts: sshDeviceHosts(environment.serverConfig?.settings.deviceHosts ?? []),
+    hosts: environment.serverConfig?.settings.deviceHosts ?? [],
   }));
   const groupedHosts = groupDeviceHosts(hostEnvironments);
   const save = async (host: SshDeviceHostConfig, remove = false, original = host) => {

@@ -18,6 +18,7 @@ import {
   type DeviceShutdownInput,
   type DeviceSummary,
   type DeviceHostConfig,
+  type EasDeviceHostConfig,
   type SshDeviceHostConfig,
   type DeviceHostSummary,
   LOCAL_DEVICE_HOST_ID,
@@ -990,9 +991,17 @@ export const make = Effect.gen(function* () {
     );
   });
   const changes = yield* settings.subscribeChanges;
-  yield* reconcile((yield* settings.getSettings).deviceHosts);
+  // Settings keep EAS hosts apart from SSH hosts; an id both lists use stays the SSH host's.
+  const configuredHosts = (value: {
+    readonly deviceHosts: ReadonlyArray<SshDeviceHostConfig>;
+    readonly easDeviceHosts: ReadonlyArray<EasDeviceHostConfig>;
+  }): ReadonlyArray<DeviceHostConfig> => [
+    ...value.deviceHosts,
+    ...value.easDeviceHosts.filter((host) => !value.deviceHosts.some((ssh) => ssh.id === host.id)),
+  ];
+  yield* reconcile(configuredHosts(yield* settings.getSettings));
   yield* changes.pipe(
-    Stream.runForEach((value) => reconcile(value.deviceHosts)),
+    Stream.runForEach((value) => reconcile(configuredHosts(value))),
     Effect.forkIn(scope),
   );
   yield* Effect.addFinalizer(() =>

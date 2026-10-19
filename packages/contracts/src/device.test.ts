@@ -1,6 +1,11 @@
 import { describe, expect, it } from "@effect/vitest";
 import { Schema } from "effect";
-import { DeviceHostConfigs, deviceToolInstallMessage } from "./device.ts";
+import {
+  DeviceServiceState,
+  EasDeviceHostConfigs,
+  SshDeviceHostConfigs,
+  deviceToolInstallMessage,
+} from "./device.ts";
 
 describe("device tool install progress", () => {
   it("distinguishes a new install from an upgrade and chooses versions numerically", () => {
@@ -22,16 +27,14 @@ describe("device tool install progress", () => {
 });
 
 describe("configured device hosts", () => {
-  const decode = Schema.decodeUnknownSync(DeviceHostConfigs);
-
-  it("reads SSH hosts saved before hosts had a kind, and EAS hosts with bounded sessions", () => {
+  it("reads SSH hosts saved before hosts had a kind, and bounds EAS sessions", () => {
     expect(
-      decode([
+      Schema.decodeUnknownSync(SshDeviceHostConfigs)([
         { id: "mac", label: "Mac mini", target: "julius@mac" },
-        { kind: "eas", id: "eas", label: "EAS Simulator" },
       ]),
-    ).toEqual([
-      { kind: "ssh", id: "mac", label: "Mac mini", target: "julius@mac" },
+    ).toEqual([{ kind: "ssh", id: "mac", label: "Mac mini", target: "julius@mac" }]);
+    const decodeEas = Schema.decodeUnknownSync(EasDeviceHostConfigs);
+    expect(decodeEas([{ kind: "eas", id: "eas", label: "EAS Simulator" }])).toEqual([
       {
         kind: "eas",
         id: "eas",
@@ -41,17 +44,45 @@ describe("configured device hosts", () => {
         maxConcurrentSessions: 2,
       },
     ]);
+    expect(() =>
+      decodeEas([{ kind: "eas", id: "eas", label: "EAS", maxSessionMinutes: 600 }]),
+    ).toThrow();
   });
+});
 
-  it("refuses sessions longer than EAS allows and ids shared across kinds", () => {
-    expect(() =>
-      decode([{ kind: "eas", id: "eas", label: "EAS", maxSessionMinutes: 600 }]),
-    ).toThrow();
-    expect(() =>
-      decode([
-        { id: "same", label: "Mac", target: "mac" },
-        { kind: "eas", id: "same", label: "EAS" },
-      ]),
-    ).toThrow();
+describe("device state for clients from before EAS hosts", () => {
+  const summary = {
+    label: "Host",
+    platforms: [],
+    hubInstalled: true,
+    agentDeviceInstalled: true,
+  };
+  const state = {
+    hosts: [
+      { ...summary, id: "local", kind: "local" as const },
+      { ...summary, id: "eas", kind: "eas" as const },
+    ],
+    hostStatus: "ready" as const,
+    hostStatuses: {},
+    devices: [],
+    sessions: [],
+    onboardingCompleted: true,
+    agentAccessEnabled: true,
+    hubBasePath: "/api/device-hub",
+    revision: 1,
+  };
+
+  it("sends EAS hosts where an older client does not look, and reads them back", () => {
+    const wire = Schema.encodeSync(DeviceServiceState)(state);
+    // The host summary as clients decoded it before EAS hosts existed.
+    const OlderState = Schema.Struct({
+      hosts: Schema.Array(
+        Schema.Struct({ id: Schema.String, kind: Schema.Literals(["local", "ssh"]) }),
+      ),
+    });
+    expect(Schema.decodeUnknownSync(OlderState)(wire).hosts.map((host) => host.id)).toEqual([
+      "local",
+    ]);
+    expect(Schema.decodeUnknownSync(DeviceServiceState)(wire).hosts).toEqual(state.hosts);
   });
 });

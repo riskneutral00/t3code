@@ -36,22 +36,6 @@ describe("device host changes across environments", () => {
     expect(updateDeviceHosts([remote, local], shared, true)).toEqual([local]);
   });
 
-  it("leaves EAS hosts in place while SSH hosts are added, edited and removed", () => {
-    const eas = {
-      kind: "eas" as const,
-      id: "eas",
-      label: "EAS Simulator",
-      maxSessionMinutes: 30,
-      idleMinutes: 10,
-      maxConcurrentSessions: 2,
-    };
-    const added = updateDeviceHosts([eas], shared, false);
-    expect(added).toEqual([eas, shared]);
-    const edited = { ...shared, target: "julius@new-address" };
-    expect(updateDeviceHosts(added, edited, false)).toEqual([eas, edited]);
-    expect(updateDeviceHosts(added, shared, true)).toEqual([eas]);
-  });
-
   it("keeps distinct SSH connections to the same target separate", () => {
     const anotherPort = { ...shared, id: "another-port", port: 2222 };
     const anotherIdentity = { ...shared, id: "another-key", identityFile: "~/.ssh/another" };
