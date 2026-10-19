@@ -57,6 +57,33 @@ const controlReplySchema = Schema.Struct({
 });
 const decodeScreenConfig = Schema.decodeUnknownOption(screenConfigSchema);
 const decodeControlReply = Schema.decodeUnknownOption(controlReplySchema);
+const iceServerSchema = Schema.Struct({
+  urls: Schema.Union([Schema.String, Schema.Array(Schema.String)]),
+  username: Schema.optionalKey(Schema.String),
+  credential: Schema.optionalKey(Schema.String),
+});
+const webRtcSettingsSchema = Schema.Struct({
+  transport: Schema.Literal("webrtc"),
+  iceServers: Schema.optionalKey(Schema.Array(iceServerSchema)),
+  iceTransportPolicy: Schema.optionalKey(Schema.Literals(["all", "relay"])),
+});
+// serve-sim reports its stream settings as `streamSettings` (EAS) or `stream`.
+const serveSimApiSchema = Schema.Struct({
+  streamSettings: Schema.optionalKey(Schema.Unknown),
+  stream: Schema.optionalKey(Schema.Unknown),
+});
+const decodeServeSimApi = Schema.decodeUnknownOption(serveSimApiSchema);
+const decodeWebRtcSettings = Schema.decodeUnknownOption(webRtcSettingsSchema);
+type WebRtcSettings = typeof webRtcSettingsSchema.Type;
+const decodeTransportLocked = Schema.decodeUnknownOption(
+  Schema.Struct({
+    error: Schema.Literal("stream_transport_locked"),
+    transport: Schema.Literal("webrtc"),
+  }),
+);
+const decodeWebRtcAnswer = Schema.decodeUnknownOption(
+  Schema.Struct({ type: Schema.Literal("answer"), sdp: Schema.String }),
+);
 
 export interface DuoPanelSinks {
   readonly cover: DeviceFrameSink;
@@ -77,6 +104,11 @@ export interface DeviceStreamEvents {
    * and attach it with `setMjpegImage` so the client can observe real frames.
    */
   readonly onMjpegFallback: (url: string) => void;
+  /**
+   * The stream moved from MJPEG back to painting the canvas, because the
+   * device serves WebRTC only; the owner should show the canvas again.
+   */
+  readonly onCanvasVideo?: () => void;
   readonly onInputConnected: (connected: boolean, detail?: string) => void;
 }
 
@@ -94,6 +126,9 @@ export type DeviceHardwareButton = "home" | "back" | "recents" | "power" | "appS
 
 const RETRY_DELAY_MS = 1_000;
 const FIRST_FRAME_TIMEOUT_MS = 15_000;
+const TRANSPORT_PROBE_TIMEOUT_MS = 5_000;
+// Offers carry every candidate: serve-sim does not accept trickled ICE.
+const ICE_GATHERING_TIMEOUT_MS = 2_000;
 const MJPEG_FRAME_CHECK_MS = 250;
 const FRAME_DURATION_US = 16_667;
 const SEMU_MAGIC = 0x53454d55;
@@ -114,6 +149,15 @@ const IOS_TAG_INPUT_ADMITTED = 0x83;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+
+/** serve-sim requires a v4 UUID; `crypto.randomUUID` is missing over plain-HTTP LAN origins. */
+function webRtcSessionId(): string {
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 
 const isWebCodecsSupported = (): boolean =>
   typeof globalThis !== "undefined" &&
@@ -367,6 +411,8 @@ export function createDeviceStreamClient(
   let panelSinks: DuoPanelSinks | null = null;
   let rotationCursor: DeviceScreenSize["orientation"] | null = null;
   let pendingOrientation: { requestId: number } | null = null;
+  let peer: { connection: RTCPeerConnection; sessionId: string; video: HTMLVideoElement } | null =
+    null;
   const duoControl = createDuoControl({
     send(request) {
       if (
@@ -454,7 +500,11 @@ export function createDeviceStreamClient(
       }
     };
     const error = () => {
-      if (!released) fail("Could not receive the device stream. Reconnect to try again.");
+      if (released) return;
+      const failure = "Could not receive the device stream. Reconnect to try again.";
+      // An <img> cannot read the 409 that a WebRTC-only serve-sim answers with.
+      if (typeof RTCPeerConnection === "undefined") fail(failure);
+      else void switchToWebRtc(failure, false);
     };
     image.addEventListener("load", check);
     image.addEventListener("error", error);
@@ -646,6 +696,15 @@ export function createDeviceStreamClient(
         return;
       }
       if (response.status === 401 || response.status === 403) return handleUnauthorized();
+      if (response.status === 409 && !target.panelId) {
+        const locked = decodeTransportLocked(await response.json().catch(() => null));
+        if (Option.isSome(locked)) {
+          if (!isCurrent()) return;
+          controller = null;
+          void switchToWebRtc("This browser cannot play this device's WebRTC stream.", true);
+          return;
+        }
+      }
       if (target.panelId && [400, 404, 405, 410].includes(response.status)) {
         await response.body?.cancel();
         setStatus("error", "This Device Hub does not provide fixed Duo display feeds.");
@@ -751,6 +810,174 @@ export function createDeviceStreamClient(
       controller.abort();
       if (primeController === controller) primeController = null;
     }
+  };
+
+  /**
+   * serve-sim can be locked to WebRTC (EAS Simulator always is), and then
+   * refuses AVCC and MJPEG. An unreadable answer keeps the AVCC path.
+   */
+  const probeIosTransport = async (): Promise<WebRtcSettings | null> => {
+    const probe = new AbortController();
+    const timeout = setTimeout(() => probe.abort(), TRANSPORT_PROBE_TIMEOUT_MS);
+    try {
+      const response = await fetch(httpUrl(`/api?device=${device}`), {
+        signal: probe.signal,
+        credentials: access.credentials ? "include" : "same-origin",
+      });
+      if (!response.ok) return null;
+      const api = decodeServeSimApi(await response.json());
+      if (Option.isNone(api)) return null;
+      const settings = decodeWebRtcSettings(api.value.streamSettings ?? api.value.stream);
+      return Option.isSome(settings) ? settings.value : null;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  const closePeer = () => {
+    const current = peer;
+    if (!current) return;
+    peer = null;
+    current.connection.close();
+    current.video.srcObject = null;
+    current.video.remove();
+    // Releases serve-sim's capture session; best effort because the page may be unloading.
+    void fetch(httpUrl(`/helper/${device}/webrtc/close`), {
+      method: "POST",
+      keepalive: true,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: current.sessionId }),
+      credentials: access.credentials ? "include" : "same-origin",
+    }).catch(() => {});
+  };
+
+  const readIosWebRtc = async (settings: WebRtcSettings) => {
+    const lifecycle = generation;
+    const feedGeneration = ++videoGeneration;
+    closePeer();
+    const connection = new RTCPeerConnection({
+      ...(settings.iceServers
+        ? {
+            iceServers: settings.iceServers.map((server) => ({
+              ...server,
+              urls: typeof server.urls === "string" ? server.urls : [...server.urls],
+            })),
+          }
+        : {}),
+      iceTransportPolicy: settings.iceTransportPolicy ?? "all",
+    });
+    // Frames only reach requestVideoFrameCallback from a video that is in the
+    // document; it stays invisible because the sink paints them.
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.setAttribute("aria-hidden", "true");
+    video.style.cssText =
+      "position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:0;top:0";
+    document.body.append(video);
+    const current = { connection, sessionId: webRtcSessionId(), video };
+    peer = current;
+    const isCurrent = () =>
+      !stopped &&
+      generation === lifecycle &&
+      videoGeneration === feedGeneration &&
+      peer === current;
+    const retry = (detail: string) => {
+      if (!isCurrent()) return;
+      closePeer();
+      connecting(detail);
+      scheduleRetry("video", () => void readIosWebRtc(settings));
+    };
+    const presentFrame = () => {
+      if (!isCurrent()) return;
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        paint(video, video.videoWidth, video.videoHeight);
+      }
+      video.requestVideoFrameCallback(presentFrame);
+    };
+    const transceiver = connection.addTransceiver("video", { direction: "recvonly" });
+    const codecs = RTCRtpReceiver.getCapabilities("video")?.codecs ?? [];
+    if (codecs.length > 0) {
+      // serve-sim encodes H.264; other codecs stay as fallbacks it may refuse.
+      transceiver.setCodecPreferences([
+        ...codecs.filter((codec) => codec.mimeType.toLowerCase() === "video/h264"),
+        ...codecs.filter((codec) => codec.mimeType.toLowerCase() !== "video/h264"),
+      ]);
+    }
+    connection.ontrack = (event) => {
+      if (!isCurrent()) return;
+      video.srcObject = event.streams[0] ?? new MediaStream([event.track]);
+      void video.play().catch(() => {});
+      video.requestVideoFrameCallback(presentFrame);
+    };
+    connection.onconnectionstatechange = () => {
+      if (connection.connectionState === "failed")
+        retry("Device stream connection failed. Reconnecting…");
+    };
+    try {
+      await connection.setLocalDescription(await connection.createOffer());
+      await new Promise<void>((resolve) => {
+        if (connection.iceGatheringState === "complete") return resolve();
+        const timer = setTimeout(done, ICE_GATHERING_TIMEOUT_MS);
+        function done() {
+          clearTimeout(timer);
+          connection.removeEventListener("icegatheringstatechange", changed);
+          resolve();
+        }
+        function changed() {
+          if (connection.iceGatheringState === "complete") done();
+        }
+        connection.addEventListener("icegatheringstatechange", changed);
+      });
+      if (!isCurrent()) return;
+      const response = await fetch(httpUrl(`/helper/${device}/webrtc/offer`), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          type: "offer",
+          sdp: connection.localDescription?.sdp,
+          sessionId: current.sessionId,
+          codec: "h264",
+        }),
+        credentials: access.credentials ? "include" : "same-origin",
+      });
+      if (!isCurrent()) {
+        await response.body?.cancel();
+        return;
+      }
+      if (response.status === 401 || response.status === 403) return handleUnauthorized();
+      // 409: another viewer is still negotiating with this simulator.
+      if (!response.ok) return retry(`Device stream offer failed (${response.status}). Retrying…`);
+      const answer = decodeWebRtcAnswer(await response.json());
+      if (!isCurrent()) return;
+      if (Option.isNone(answer))
+        return retry("Device stream returned an invalid answer. Retrying…");
+      await connection.setRemoteDescription(answer.value);
+    } catch (cause) {
+      retry((cause as Error).message);
+    }
+  };
+
+  /**
+   * Called once AVCC or MJPEG was refused. `locked` means serve-sim already
+   * said it streams WebRTC only, so a missing /api answer still switches.
+   */
+  const switchToWebRtc = async (failure: string, locked: boolean) => {
+    const session = generation;
+    if (typeof RTCPeerConnection === "undefined") return fail(failure);
+    const settings =
+      (await probeIosTransport()) ?? (locked ? { transport: "webrtc" as const } : null);
+    if (stopped || generation !== session) return;
+    if (!settings) return fail(failure);
+    if (mjpeg) {
+      mjpeg = false;
+      releaseImage?.();
+      releaseImage = null;
+      events.onCanvasVideo?.();
+    }
+    void readIosWebRtc(settings);
   };
 
   const startDuoVideo = (panels: DuoPanelSinks) => {
@@ -987,6 +1214,7 @@ export function createDeviceStreamClient(
     primeController = null;
     controller?.abort();
     controller = null;
+    closePeer();
     const discarded = socket;
     socket = null;
     discarded?.close();
