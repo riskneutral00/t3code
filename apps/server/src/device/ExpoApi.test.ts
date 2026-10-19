@@ -5,7 +5,7 @@ import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Redacted from "effect/Redacted";
-import { HttpClient, HttpClientResponse } from "effect/http";
+import { HttpClient, HttpClientError, HttpClientResponse } from "effect/http";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import { makeExpoApi, resolveExpoCredential, type ExpoCredential } from "./ExpoApi.ts";
@@ -103,6 +103,25 @@ describe("Expo API", () => {
       expect(Redacted.value(session.endpoints!.agentDevice.token)).toBe("agent-token");
       expect(session.endpoints?.preview?.url).toBe("https://preview.test?token=preview-token");
       expect(Redacted.value(session.endpoints!.preview!.token)).toBe("preview-token");
+    }),
+  );
+
+  it.effect("keeps the credential out of errors when Expo is unreachable", () =>
+    Effect.gen(function* () {
+      const http = HttpClient.make((request) =>
+        Effect.fail(
+          new HttpClientError.HttpClientError({
+            reason: new HttpClientError.TransportError({
+              request,
+              description: "connection reset",
+            }),
+          }),
+        ),
+      );
+      const error = yield* makeExpoApi(http, credential).viewer.pipe(Effect.flip);
+      expect(error.message).toContain("Expo's API is unreachable");
+      expect(JSON.stringify(error)).not.toContain("session-secret");
+      expect(error.cause).toBeUndefined();
     }),
   );
 

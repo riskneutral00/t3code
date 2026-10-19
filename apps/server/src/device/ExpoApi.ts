@@ -256,17 +256,20 @@ export const makeExpoApi = (http: HttpClient.HttpClient, credential: ExpoCredent
           Redacted.value(credential.header.value),
         ),
         HttpClientRequest.bodyJson({ query, variables }),
-        Effect.mapError((cause) => failure(undefined, cause)),
+        // HTTP errors hold the request, whose credential header must not reach logs.
+        Effect.mapError(() => failure("the request could not be encoded")),
       );
       const response = yield* client
         .execute(request)
-        .pipe(Effect.mapError((cause) => failure("Expo's API is unreachable", cause)));
+        .pipe(
+          Effect.mapError((error) => failure(`Expo's API is unreachable (${error.reason._tag})`)),
+        );
       if (response.status === 401 || response.status === 403) {
         const what = credential.source === "eas-login" ? "eas login session" : "access token";
         return yield* failure(`the ${what} was rejected (HTTP ${response.status})`);
       }
       const body = yield* HttpClientResponse.schemaBodyJson(GraphQlResponse)(response).pipe(
-        Effect.mapError((cause) => failure(`unexpected response (HTTP ${response.status})`, cause)),
+        Effect.mapError(() => failure(`unexpected response (HTTP ${response.status})`)),
       );
       if (body.errors?.length) {
         return yield* failure(body.errors.map((error) => error.message).join("; "));
