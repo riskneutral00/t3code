@@ -1093,8 +1093,8 @@ export const make = Effect.gen(function* () {
       concurrency: 4,
     }),
   );
-  const easAccount: DeviceService["Service"]["easAccount"] = (input) =>
-    Effect.gen(function* () {
+  const easAccount: DeviceService["Service"]["easAccount"] = Effect.fn("DeviceService.easAccount")(
+    function* (input) {
       const saved =
         input.hostId === undefined
           ? ""
@@ -1103,11 +1103,10 @@ export const make = Effect.gen(function* () {
       const credential = yield* resolveExpoCredential(input.accessToken || saved);
       const viewer = yield* makeExpoApi(yield* HttpClient.HttpClient, credential).viewer;
       return { signedInAs: viewer.name, credentialSource: credential.source, apps: viewer.apps };
-    }).pipe(
-      Effect.provide(easContext),
-      Effect.mapError((cause) => new DeviceEasAccountError({ reason: cause.message })),
-      Effect.withSpan("DeviceService.easAccount"),
-    );
+    },
+    Effect.provide(easContext),
+    Effect.mapError((cause) => new DeviceEasAccountError({ reason: cause.message })),
+  );
 
   return {
     ...service,
