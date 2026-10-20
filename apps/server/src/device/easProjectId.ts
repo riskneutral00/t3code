@@ -15,19 +15,6 @@ const JSON_CONFIG_FILES = ["app.config.json", "app.json"];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LITERAL_PROJECT_ID =
   /projectId["']?\s*:\s*["'`]([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["'`]/gi;
-// Good enough for config files: a `//` inside a string literal is rare, and
-// a missed comment only makes the answer ambiguous, never wrong.
-const COMMENTS = /\/\*[\s\S]*?\*\/|(^|[^:])\/\/.*$/gm;
-
-/** The one project id a config's code names; none when it names several. */
-const literalProjectId = (source: string) => {
-  const ids = new Set(
-    [...source.replace(COMMENTS, "$1").matchAll(LITERAL_PROJECT_ID)].map((match) =>
-      match[1]!.toLowerCase(),
-    ),
-  );
-  return ids.size === 1 ? Option.some([...ids][0]!) : Option.none<string>();
-};
 
 const decodeAppJson = Schema.decodeUnknownOption(
   Schema.fromJsonString(
@@ -46,11 +33,14 @@ const decodeAppJson = Schema.decodeUnknownOption(
 );
 
 /**
- * Read, never run: a dynamic config is the project's own code, which an agent
- * may have written, so only a literal `projectId` in it, outside comments, or
- * in app.config.json or app.json counts.
+ * The project ids a directory's app config names. Read, never run: a dynamic
+ * config is the project's own code, which an agent may have written. Its text
+ * is taken as it is, comments included, so an old id left in a comment makes
+ * the answer ambiguous rather than wrong. app.config.json and app.json count
+ * only when the dynamic config never mentions a project id, since it may
+ * replace theirs.
  */
-const projectIdOf = Effect.fn("easProjectId.projectIdOf")(function* (dir: string) {
+const projectIdsOf = Effect.fn("easProjectId.projectIdsOf")(function* (dir: string) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const configFile = yield* Effect.findFirst(CONFIG_FILES, (file) =>
@@ -59,9 +49,10 @@ const projectIdOf = Effect.fn("easProjectId.projectIdOf")(function* (dir: string
   if (Option.isSome(configFile)) {
     const source = yield* fs
       .readFileString(path.join(dir, configFile.value))
-      .pipe(Effect.orElseSucceed(() => ""));
-    const literal = literalProjectId(source);
-    if (Option.isSome(literal)) return literal;
+      .pipe(Effect.orElseSucceed(() => "projectId"));
+    if (/projectId/i.test(source)) {
+      return [...source.matchAll(LITERAL_PROJECT_ID)].map((match) => match[1]!.toLowerCase());
+    }
   }
   for (const file of JSON_CONFIG_FILES) {
     const json = yield* fs.readFileString(path.join(dir, file)).pipe(Effect.option);
@@ -69,15 +60,16 @@ const projectIdOf = Effect.fn("easProjectId.projectIdOf")(function* (dir: string
       Option.flatMap((value) => Option.fromNullishOr(value.expo?.extra?.eas?.projectId)),
       Option.filter((id) => UUID.test(id)),
     );
-    if (Option.isSome(id)) return id;
+    if (Option.isSome(id)) return [id.value.toLowerCase()];
   }
-  return Option.none<string>();
+  return [];
 });
 
 /**
  * The EAS project of a workspace's Expo app: its root, or one app below
- * `apps/` or `packages/`. None when there is none or the apps disagree, so the
- * caller asks for an explicit choice instead of billing the wrong project.
+ * `apps/` or `packages/`. None when there is none, a config is ambiguous, or
+ * the apps disagree, so the caller asks for an explicit choice instead of
+ * billing the wrong project.
  */
 export const findEasProjectId = Effect.fn("easProjectId.findEasProjectId")(function* (
   workspaceRoot: string,
@@ -94,9 +86,7 @@ export const findEasProjectId = Effect.fn("easProjectId.findEasProjectId")(funct
     ...(yield* children("apps")),
     ...(yield* children("packages")),
   ];
-  const ids = yield* Effect.forEach(directories, projectIdOf, { concurrency: 4 });
-  const distinct = new Set(
-    ids.flatMap((id) => (Option.isSome(id) ? [id.value.toLowerCase()] : [])),
-  );
-  return distinct.size === 1 ? Option.some([...distinct][0]!) : Option.none();
+  const ids = yield* Effect.forEach(directories, projectIdsOf, { concurrency: 4 });
+  const distinct = new Set(ids.flat());
+  return distinct.size === 1 ? Option.some([...distinct][0]!) : Option.none<string>();
 });

@@ -58,24 +58,46 @@ it.effect("falls back to app.json, and does not compute a project id a config bu
 
 it.effect.each([
   {
-    case: "skips a project id in a comment",
-    config: `// projectId: "${ID_B}" (the old production project)
-      /* extra: { eas: { projectId: "${ID_B}" } } */
-      export default { extra: { eas: { projectId: "${ID_A}" } }, url: "https://expo.dev" };`,
+    case: "reads the one project id a config names, whatever else it holds",
+    files: {
+      "app.config.js": `export default {
+        assetBundlePatterns: ["**/*"],
+        extra: { eas: { projectId: "${ID_A}" } },
+      };
+      /** docs */`,
+      "app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_B } } } }),
+    },
     expected: Option.some(ID_A),
   },
   {
-    case: "gives no answer when the config names two projects",
-    config: `export default ({ config }) => ({
-        extra: { eas: { projectId: process.env.PROD ? "${ID_A}" : "${ID_B}" } },
-      });`,
+    case: "gives no answer when a comment keeps an old project id",
+    files: {
+      "app.config.js": `// projectId: "${ID_B}" (the old production project)
+        export default { extra: { eas: { projectId: "${ID_A}" } } };`,
+    },
     expected: Option.none(),
   },
-])("$case", ({ config, expected }) =>
+  {
+    case: "gives no answer for a config naming two projects, even with app.json",
+    files: {
+      "app.config.js": `export default () => ({
+        extra: { eas: { projectId: process.env.PROD ? "${ID_A}" : "${ID_B}" } },
+      });`,
+      "app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_A } } } }),
+    },
+    expected: Option.none(),
+  },
+  {
+    case: "uses app.json when the config never mentions a project id",
+    files: {
+      "app.config.js": `export default ({ config }) => ({ ...config, name: "Mobile" });`,
+      "app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_B } } } }),
+    },
+    expected: Option.some(ID_B),
+  },
+])("$case", ({ files, expected }) =>
   Effect.gen(function* () {
-    expect(yield* findEasProjectId(yield* workspace({ "app.config.js": config }))).toEqual(
-      expected,
-    );
+    expect(yield* findEasProjectId(yield* workspace(files))).toEqual(expected);
   }).pipe(Effect.scoped, Effect.provide(layer)),
 );
 
