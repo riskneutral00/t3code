@@ -572,6 +572,54 @@ describe("EAS Simulator host", () => {
       }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 
+  it.effect("waits for a record write in flight before its scope closes", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const gate = yield* makeGate;
+      let armed = false;
+      // The ledger read inside a write waits on the gate once armed.
+      const gatedFs: FileSystem.FileSystem = {
+        ...fs,
+        readFileString: (path, encoding) =>
+          Effect.gen(function* () {
+            if (armed && path.endsWith("eas.json")) {
+              armed = false;
+              yield* Deferred.succeed(gate.requested, undefined);
+              yield* Deferred.await(gate.release);
+            }
+            return yield* fs.readFileString(path, encoding);
+          }),
+      };
+      let status = "IN_PROGRESS";
+      const expo = fakeExpo({ status: () => status });
+      const first = yield* Scope.make();
+      const old = yield* makeHost(expo, config(), first).pipe(
+        Effect.provideService(FileSystem.FileSystem, gatedFs),
+      );
+      const oldReady = yield* old.ensureReady(() => Effect.void);
+      const [catalogDevice] = (yield* oldReady.devices.list).devices;
+      expect(yield* oldReady.devices.boot(catalogDevice!)).toBe("session-1");
+      // Expo ended the session; the next listing forgets its record.
+      status = "STOPPED";
+      yield* TestClock.adjust("20 seconds");
+      armed = true;
+      const listing = yield* oldReady.devices.list.pipe(Effect.forkChild);
+      yield* Deferred.await(gate.requested);
+      // Settings saved while that write is in flight: closing waits for it.
+      const closing = yield* Scope.close(first, Exit.void).pipe(Effect.forkChild);
+      yield* TestClock.adjust("1 second");
+      expect(closing.pollUnsafe()).toBeUndefined();
+      yield* Deferred.succeed(gate.release, undefined);
+      yield* Fiber.join(listing);
+      yield* Fiber.join(closing);
+      const replacement = yield* makeHost(expo, config(), yield* Scope.make());
+      const ready = yield* replacement.ensureReady(() => Effect.void);
+      const [device] = (yield* ready.devices.list).devices;
+      status = "IN_PROGRESS";
+      expect(yield* ready.devices.boot(device!)).toBe("session-2");
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+
   it.effect("keeps an old record whose session is listed but cannot be stopped", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

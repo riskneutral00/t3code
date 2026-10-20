@@ -821,10 +821,14 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
   }).pipe(Effect.ignore);
   yield* Effect.addFinalizer(() =>
     stopAll.pipe(
+      // Under the ledger lock, so a write still in flight lands before a
+      // replacement writes its own, which that write would overwrite.
       Effect.andThen(
-        Effect.sync(() => {
-          closed = true;
-        }),
+        ledgerLock.withPermit(
+          Effect.sync(() => {
+            closed = true;
+          }),
+        ),
       ),
     ),
   );
