@@ -186,7 +186,7 @@ function EasDeviceHostEditor(props: {
   // Why Save is off, for the limits the fields' ranges do not show.
   const problem = valid
     ? null
-    : draft.idleMinutes >= draft.maxSessionMinutes
+    : draft.maxSessionMinutes > 0 && draft.idleMinutes >= draft.maxSessionMinutes
       ? "Idle minutes must be smaller than session minutes."
       : "Give the host a label and limits within the ranges shown.";
   const apps = account.status === "signed-in" ? account.account.apps : [];
