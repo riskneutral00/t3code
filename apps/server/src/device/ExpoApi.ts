@@ -171,10 +171,11 @@ const toExpoApiError = (
   const reason = error.reason;
   const status =
     reason._tag === "TransportError" || reason._tag === "ResponseError" ? reason.status : undefined;
+  // Expo refused: a request it never got, a 4xx, or GraphQL errors at a 2xx
+  // or 4xx. GraphQL errors at a 5xx came from a request that may have run.
   const rejected =
-    reason._tag === "ResponseError" ||
     reason._tag === "EncodeError" ||
-    (status !== undefined && status >= 400 && status < 500);
+    (status !== undefined && status < 500 && (status >= 400 || reason._tag === "ResponseError"));
   const failure = (detail: string) => new ExpoApiError({ operation, detail, rejected });
   if (status === 401 || status === 403) {
     const what = credential.source === "eas-login" ? "eas login session" : "access token";

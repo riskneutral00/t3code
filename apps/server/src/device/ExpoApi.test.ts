@@ -162,8 +162,22 @@ describe("Expo API", () => {
       expect(rejected.message).toBe(
         "Expo could not stop a simulator session: the eas login session was rejected (HTTP 401)",
       );
-      // Expo answered and refused both: nothing was done.
-      expect([graphQl.rejected, rejected.rejected]).toEqual([true, true]);
+      const serverError = yield* makeExpoApi(
+        respond(Response.json({ errors: [{ message: "Internal server error" }] }, { status: 502 })),
+        credential,
+      )
+        .stop("session-1")
+        .pipe(Effect.flip);
+      expect(serverError.message).toBe(
+        "Expo could not stop a simulator session: Internal server error",
+      );
+      // Expo answered and refused the first two: nothing was done. GraphQL
+      // errors at a server error may come from a request that ran.
+      expect([graphQl.rejected, rejected.rejected, serverError.rejected]).toEqual([
+        true,
+        true,
+        false,
+      ]);
     }),
   );
 });

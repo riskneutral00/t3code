@@ -106,6 +106,27 @@ it.effect.each([
     expected: Option.none(),
   },
   {
+    case: "gives no answer when a config changes the project id after naming it",
+    files: {
+      "app.config.js": `export default ({ config }) => {
+        config.extra = { eas: { projectId: "${ID_A}" } };
+        if (process.env.APP_ENV === "development") {
+          config.extra.eas.projectId = process.env.DEV_PROJECT_ID;
+        }
+        return config;
+      };`,
+    },
+    expected: Option.none(),
+  },
+  {
+    case: "uses app.json when the config only mentions a longer identifier",
+    files: {
+      "app.config.js": `const easProjectIds = {}; export default { name: "Mobile", easProjectIds };`,
+      "app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_B } } } }),
+    },
+    expected: Option.some(ID_B),
+  },
+  {
     case: "uses app.json when the config never mentions a project id",
     files: {
       "app.config.js": `export default ({ config }) => ({ ...config, name: "Mobile" });`,
@@ -125,6 +146,21 @@ it.effect("reads app.config.json like app.json", () =>
       "app.config.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_B } } } }),
     });
     expect(yield* findEasProjectId(root)).toEqual(Option.some(ID_B));
+  }).pipe(Effect.scoped, Effect.provide(layer)),
+);
+
+it.effect("gives no answer when an app's config is there but cannot be read", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    for (const file of ["app.json", "app.config.json"]) {
+      const root = yield* workspace({
+        "apps/two/app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_B } } } }),
+      });
+      // A directory where the file should be: it exists but cannot be read.
+      yield* fs.makeDirectory(path.join(root, "apps/one", file), { recursive: true });
+      expect(yield* findEasProjectId(root)).toEqual(Option.none());
+    }
   }).pipe(Effect.scoped, Effect.provide(layer)),
 );
 
