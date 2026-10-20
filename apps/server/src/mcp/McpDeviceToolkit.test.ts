@@ -166,7 +166,8 @@ it.effect("returns the complete bounded launch diagnostics to the agent", () => 
   });
   const failedDevices = Layer.mock(DeviceService.DeviceService)({
     list: Effect.succeed(state),
-    agentTarget: () => Effect.succeed([]),
+    agentReadinessIfSupported: () => Effect.succeed(readiness),
+    agentTarget: () => Effect.succeed({ agentDeviceId: "UDID-1", args: [] }),
     open: () => Effect.fail(failure),
   });
   return Effect.gen(function* () {
@@ -186,6 +187,7 @@ it.effect("returns the complete bounded launch diagnostics to the agent", () => 
         Layer.provideMerge(McpServer.McpServer.layer),
         Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
         Layer.provide(failedDevices),
+        Layer.provide(layerProjectsMock),
         Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-boot-error-test-" })),
         Layer.provide(NodeServices.layer),
       ),
