@@ -44,6 +44,8 @@ const fakeExpo = (
   options: {
     readonly status?: () => string;
     readonly failCreate?: boolean;
+    /** Expo answers the create with GraphQL errors: a refusal. */
+    readonly rejectCreate?: boolean;
     readonly failStop?: () => boolean;
     readonly active?: ReadonlyArray<{ id: string; status: string; name: string }>;
     readonly previewGate?: Gate;
@@ -90,6 +92,11 @@ const fakeExpo = (
         }
         if (createFails)
           return HttpClientResponse.fromWeb(request, new Response("bad gateway", { status: 502 }));
+        if (options.rejectCreate)
+          return HttpClientResponse.fromWeb(
+            request,
+            Response.json({ errors: [{ message: "Not allowed" }] }),
+          );
       }
       if (operation === "T3StopEasSimulatorSession" && options.failStop?.()) {
         return HttpClientResponse.fromWeb(request, new Response("bad gateway", { status: 502 }));
@@ -353,6 +360,46 @@ describe("EAS Simulator host", () => {
       yield* TestClock.adjust("6 minutes");
       yield* ready.devices.list;
       expect(yield* ready.devices.boot(catalogDevice!)).toBe("session-1");
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+
+  it.effect("counts an old record a previous server left until a sweep stops its session", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const server = yield* ServerConfig.ServerConfig;
+      const ledger = path.join(server.stateDir, "device", "eas", "eas.json");
+      yield* fs.makeDirectory(path.dirname(ledger), { recursive: true });
+      yield* fs.writeFileString(
+        ledger,
+        JSON.stringify([
+          { name: "T3 Code · EAS Simulator · old", appId: APP_ID, recordedAt: -10 * 60_000 },
+        ]),
+      );
+      const expo = fakeExpo({
+        active: [
+          { id: "old-session", status: "IN_PROGRESS", name: "T3 Code · EAS Simulator · old" },
+        ],
+      });
+      const host = yield* makeHost(expo, config({ maxConcurrentSessions: 1 }), yield* Scope.make());
+      const ready = yield* host.ensureReady(() => Effect.void);
+      // Listing sweeps before anything starts, so the old session is stopped first.
+      const [catalogDevice] = (yield* ready.devices.list).devices;
+      expect(expo.stopped()).toContain("old-session");
+      expect(yield* ready.devices.boot(catalogDevice!)).toBe("session-1");
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+
+  it.effect("stops the session a refused create made anyway", () =>
+    Effect.gen(function* () {
+      // Expo refuses the create but lists a session by its name.
+      const expo = fakeExpo({ rejectCreate: true });
+      const host = yield* makeHost(expo, config({ maxConcurrentSessions: 1 }), yield* Scope.make());
+      const ready = yield* host.ensureReady(() => Effect.void);
+      const [catalogDevice] = (yield* ready.devices.list).devices;
+      const failure = yield* ready.devices.boot(catalogDevice!).pipe(Effect.flip);
+      expect(failure.message).toContain("Not allowed");
+      expect(expo.stopped()).toEqual(["orphan"]);
     }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 

@@ -118,6 +118,8 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
   const checkedAt = new Map<string, number>();
   const startLock = yield* Semaphore.make(1);
   const ledgerLock = yield* Semaphore.make(1);
+  // One sweep at a time: two would stop the same session twice.
+  const reapLock = yield* Semaphore.make(1);
   // Starts run in the host rather than the caller: a client that disconnects
   // while a session boots leaves it running and tracked, and stopping or
   // closing the host interrupts the start, which then stops its session.
@@ -273,15 +275,16 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
     );
 
   /**
-   * Fresh records a previous server left count against the limit until Expo
-   * lists them or would have by now, so a restart cannot start past it.
+   * Records a previous server left count against the limit until a sweep
+   * finds them (a fresh one until Expo would have listed it by now), so a
+   * restart cannot start past it.
    */
   const adoptRecorded = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
     const owned = ownedNames();
     for (const entry of yield* readLedger) {
-      const until = entry.recordedAt + UNCERTAIN_CREATE_MS;
-      if (!owned.has(entry.name) && until > now) uncertain.set(entry.name, { entry, until });
+      const until = Math.max(entry.recordedAt + UNCERTAIN_CREATE_MS, now);
+      if (!owned.has(entry.name)) uncertain.set(entry.name, { entry, until });
     }
   }).pipe(Effect.ignore);
 
@@ -301,9 +304,10 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
         entries.filter((entry) => !owned.has(entry.name)),
       );
       for (const [name, { until }] of uncertain) {
-        if (found.has(name) || reapedAt > until) uncertain.delete(name);
+        if (found.has(name) || reapedAt >= until) uncertain.delete(name);
       }
     },
+    reapLock.withPermit,
     Effect.catch((cause) =>
       Effect.logWarning("Could not stop recorded EAS Simulator sessions", { cause }),
     ),
@@ -435,9 +439,14 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
                 .pipe(
                   // Unless Expo refused, it may have made the session before
                   // failing to answer. Unlisted, it stays counted for a while.
+                  // Refused, it made nothing, unless it lists the session anyway.
                   Effect.tapError((error) =>
                     error.rejected
-                      ? forgetEntry(name)
+                      ? stopRecorded(expo, [entry]).pipe(
+                          Effect.flatMap((found) =>
+                            found.has(name) ? Effect.void : forgetEntry(name),
+                          ),
+                        )
                       : stopRecorded(expo, [entry]).pipe(
                           Effect.flatMap((found) =>
                             found.has(name)
