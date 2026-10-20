@@ -51,6 +51,8 @@ const fakeExpo = (
     readonly active?: ReadonlyArray<{ id: string; status: string; name: string }>;
     readonly previewGate?: Gate;
     readonly createGate?: Gate;
+    /** Holds the first session read it answers with a gate. */
+    readonly sessionGate?: () => Gate | undefined;
     readonly activeIncludesCreated?: boolean;
     readonly failPreview?: boolean;
     readonly omitCreatedFromActive?: boolean;
@@ -61,6 +63,7 @@ const fakeExpo = (
   let createdName = "";
   let previewFails = options.failPreview ?? false;
   let createFails = options.failCreate ?? false;
+  let sessionGated = false;
   const http = HttpClient.make((request) =>
     Effect.gen(function* () {
       const url = new URL(request.url);
@@ -104,6 +107,13 @@ const fakeExpo = (
       }
       if (operation === "T3ActiveEasSimulatorSessions" && options.failList?.()) {
         return HttpClientResponse.fromWeb(request, new Response("bad gateway", { status: 502 }));
+      }
+      const sessionGate =
+        operation === "T3EasSimulatorSession" ? options.sessionGate?.() : undefined;
+      if (sessionGate && !sessionGated) {
+        sessionGated = true;
+        yield* Deferred.succeed(sessionGate.requested, undefined);
+        yield* Deferred.await(sessionGate.release);
       }
       const data =
         operation === "T3EasSimulatorAvailability"
@@ -531,6 +541,35 @@ describe("EAS Simulator host", () => {
       yield* oldReady.devices.list;
       expect(expo.stopped()).toEqual(["session-1"]);
     }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+
+  it.effect(
+    "does not sweep a replacement's session from a listing in flight when its scope closes",
+    () =>
+      Effect.gen(function* () {
+        const gate = yield* makeGate;
+        let armed = false;
+        const expo = fakeExpo({ sessionGate: () => (armed ? gate : undefined) });
+        const first = yield* Scope.make();
+        const old = yield* makeHost(expo, config(), first);
+        const oldReady = yield* old.ensureReady(() => Effect.void);
+        const [catalogDevice] = (yield* oldReady.devices.list).devices;
+        expect(yield* oldReady.devices.boot(catalogDevice!)).toBe("session-1");
+        // Long enough that the listing reads the session's status and a sweep is due.
+        yield* TestClock.adjust("2 minutes");
+        armed = true;
+        const listing = yield* oldReady.devices.list.pipe(Effect.forkChild);
+        yield* Deferred.await(gate.requested);
+        // Settings saved while the old listing waits on Expo.
+        yield* Scope.close(first, Exit.void);
+        const replacement = yield* makeHost(expo, config(), yield* Scope.make());
+        const ready = yield* replacement.ensureReady(() => Effect.void);
+        const [device] = (yield* ready.devices.list).devices;
+        expect(yield* ready.devices.boot(device!)).toBe("session-2");
+        yield* Deferred.succeed(gate.release, undefined);
+        yield* Fiber.join(listing);
+        expect(expo.stopped()).toEqual(["session-1"]);
+      }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 
   it.effect("keeps an old record whose session is listed but cannot be stopped", () =>
