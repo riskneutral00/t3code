@@ -91,7 +91,7 @@ export function EasDeviceHostsSettings(props: { environmentId: EnvironmentId | n
       title="EAS Simulator"
       serverScoped
       settingKeys={["easDeviceHosts"]}
-      description="Run iOS Simulators in Expo's cloud from this environment. Sessions bill the Expo account until they stop, so each host limits how many run and for how long."
+      description="Run iOS Simulators in Expo's cloud from this environment. Sessions bill the Expo account until they stop, so each host limits how many run and for how long. Editing or removing a host stops its running sessions."
       control={
         <Button
           size="sm"
@@ -183,6 +183,12 @@ function EasDeviceHostEditor(props: {
       token.kind === "saved" ? props.host.accessToken : token.kind === "new" ? token.value : "",
   };
   const valid = Option.isSome(parseEasDeviceHostDraft(next));
+  // Why Save is off, for the limits the fields' ranges do not show.
+  const problem = valid
+    ? null
+    : draft.idleMinutes >= draft.maxSessionMinutes
+      ? "Idle minutes must be smaller than session minutes."
+      : "Give the host a label and limits within the ranges shown.";
   const apps = account.status === "signed-in" ? account.account.apps : [];
 
   // A check answers for the credential it was asked about: a later check or a
@@ -381,6 +387,11 @@ function EasDeviceHostEditor(props: {
               session minutes.
               {props.isNew ? null : " Saving restarts this host, which stops its running sessions."}
             </p>
+            {problem === null ? null : (
+              <p className="text-xs text-destructive" role="alert">
+                {problem}
+              </p>
+            )}
           </DialogPanel>
           <DialogFooter>
             <Button type="button" variant="ghost" disabled={props.busy} onClick={props.onClose}>
