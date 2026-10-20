@@ -240,6 +240,31 @@ it.effect.each([
     expected: Option.none(),
   },
   {
+    case: "gives no answer when the config is assigned over across lines after naming the project id",
+    files: {
+      "app.config.js": `import { assign } from "lodash";
+        export default ({ config }) => {
+        config.extra = { eas: { projectId: "${ID_A}" } };
+        Object
+          .assign(config.extra.eas, JSON.parse(process.env.EAS_OVERRIDES ?? "{}"));
+        return config;
+      };`,
+    },
+    expected: Option.none(),
+  },
+  {
+    case: "gives no answer when a helper assigns over the config after naming the project id",
+    files: {
+      "app.config.js": `import { assign } from "lodash";
+        export default ({ config }) => {
+        config.extra = { eas: { projectId: "${ID_A}" } };
+        assign (config.extra.eas, JSON.parse(process.env.EAS_OVERRIDES ?? "{}"));
+        return config;
+      };`,
+    },
+    expected: Option.none(),
+  },
+  {
     case: "reads a project id that follows spreads",
     files: {
       "app.config.js": `export default ({ config }) => ({

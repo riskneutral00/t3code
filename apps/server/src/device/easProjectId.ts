@@ -33,7 +33,7 @@ const MAX_MENTIONS = 32;
 // Object.assign. Anywhere after it, at any depth, since a spread in an
 // enclosing object replaces the entry too, and a comment or string could
 // hide a brace from a scan of the entry's own object.
-const REPLACES_LATER = /\.\.\.|\bObject\.assign\b/;
+const REPLACES_LATER = /\.\.\.|\bObject\s*\.\s*assign\b|\bassign\s*\(/;
 
 const Extra = Schema.optional(
   Schema.Struct({
