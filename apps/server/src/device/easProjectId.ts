@@ -14,10 +14,11 @@ const CONFIG_FILES = [
 const JSON_CONFIG_FILES = ["app.config.json", "app.json"];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // A `projectId` whose whole value is one quoted string: the entry ends at the
-// quote. An EAS project id is a UUID; another service's (Firebase's, say)
+// quote (then a separator, a comment, or the end of the file; a line break
+// alone does not end it, since an operator may follow). An EAS project id is a UUID; another service's (Firebase's, say)
 // is not, and names no EAS project.
 const QUOTED_PROJECT_ID =
-  /\bprojectId["']?\s*:\s*["'`]([^"'`\n]*)["'`](?=\s*(?:[,;})\]]|\/\/|\/\*|$))/gim;
+  /\bprojectId["']?\s*:\s*["'`]([^"'`\n]*)["'`](?=\s*(?:[,;})\]]|\/\/|\/\*|$))/gi;
 const PROJECT_ID_MENTION = /\bprojectId\b/gi;
 
 const Extra = Schema.optional(

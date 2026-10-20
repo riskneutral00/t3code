@@ -156,6 +156,17 @@ it.effect.each([
     expected: Option.none(),
   },
   {
+    case: "gives no answer when a config joins the project id across lines",
+    files: {
+      "apps/mobile/app.config.ts": `export default {
+        extra: { eas: { projectId: "${ID_A.slice(0, 9)}"
+          + "${ID_A.slice(9)}" } },
+      };`,
+      "apps/kiosk/app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_B } } } }),
+    },
+    expected: Option.none(),
+  },
+  {
     case: "gives no answer when a config builds the project id in a template",
     files: {
       "app.config.js":
