@@ -275,6 +275,25 @@ it.effect.each([
     expected: Option.none(),
   },
   {
+    case: "gives no answer when a config spreads another file over app.json's project id",
+    files: {
+      "app.config.js": `module.exports = ({ config }) => ({ ...config, ...require("./app.local.js") });`,
+      "app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_A } } } }),
+    },
+    expected: Option.none(),
+  },
+  {
+    case: "reads app.json's project id through a config that only spreads the config itself",
+    files: {
+      "app.config.js": `module.exports = ({ config }) => ({
+        ...config,
+        extra: { ...config.extra, eas: { ...(config.extra?.eas ?? {}) }, apiUrl: process.env.API_URL },
+      });`,
+      "app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_A } } } }),
+    },
+    expected: Option.some(ID_A),
+  },
+  {
     case: "reads a project id that follows spreads",
     files: {
       "app.config.js": `export default ({ config }) => ({

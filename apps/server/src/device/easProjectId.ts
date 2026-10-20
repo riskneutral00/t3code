@@ -36,6 +36,9 @@ const MAX_MENTIONS = 32;
 // anywhere: `Object.assign(defaults, overrides)` names the call before
 // both arguments.
 const SPREAD_LATER = /\.\.\./;
+// A dynamic config that names no id runs after app.json's entry, so a spread
+// of anything but the config Expo hands it may replace that entry too.
+const FOREIGN_SPREAD = /\.\.\.\s*\(?\s*(?!config\b)[\w$]/;
 const ASSIGNS_OVER = /\bObject\s*\.\s*assign\b|\bassign\s*\(/;
 
 const Extra = Schema.optional(
@@ -80,12 +83,14 @@ const projectIdsOf = Effect.fn("easProjectId.projectIdsOf")(function* (dir: stri
     const entries = [...source.matchAll(QUOTED_PROJECT_ID)];
     const quoted = entries.map((match) => match[1]!);
     // A template that interpolates could be any project too, and so could
-    // one a spread after the entry, or an assignment anywhere, replaces.
+    // one a spread after the entry, or an assignment anywhere, replaces;
+    // with no entry here, app.json's is the one a foreign spread replaces.
     if (
       quoted.length !== mentions ||
       quoted.some((id) => id.includes("${")) ||
       ASSIGNS_OVER.test(source) ||
-      entries.some((match) => SPREAD_LATER.test(source.slice(match.index + match[0].length)))
+      entries.some((match) => SPREAD_LATER.test(source.slice(match.index + match[0].length))) ||
+      (entries.length === 0 && FOREIGN_SPREAD.test(source))
     ) {
       return null;
     }
