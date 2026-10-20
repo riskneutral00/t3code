@@ -26,14 +26,24 @@ describe("device tool install progress", () => {
   });
 });
 
+const decodeSshHosts = Schema.decodeUnknownSync(SshDeviceHostConfigs);
+const decodeEas = Schema.decodeUnknownSync(EasDeviceHostConfigs);
+const encodeState = Schema.encodeSync(DeviceServiceState);
+const decodeState = Schema.decodeUnknownSync(DeviceServiceState);
+// The host summary as clients decoded it before EAS hosts existed.
+const decodeOlderState = Schema.decodeUnknownSync(
+  Schema.Struct({
+    hosts: Schema.Array(
+      Schema.Struct({ id: Schema.String, kind: Schema.Literals(["local", "ssh"]) }),
+    ),
+  }),
+);
+
 describe("configured device hosts", () => {
   it("reads SSH hosts saved before hosts had a kind, and bounds EAS sessions", () => {
-    expect(
-      Schema.decodeUnknownSync(SshDeviceHostConfigs)([
-        { id: "mac", label: "Mac mini", target: "julius@mac" },
-      ]),
-    ).toEqual([{ kind: "ssh", id: "mac", label: "Mac mini", target: "julius@mac" }]);
-    const decodeEas = Schema.decodeUnknownSync(EasDeviceHostConfigs);
+    expect(decodeSshHosts([{ id: "mac", label: "Mac mini", target: "julius@mac" }])).toEqual([
+      { kind: "ssh", id: "mac", label: "Mac mini", target: "julius@mac" },
+    ]);
     expect(decodeEas([{ kind: "eas", id: "eas", label: "EAS Simulator" }])).toEqual([
       {
         kind: "eas",
@@ -73,16 +83,8 @@ describe("device state for clients from before EAS hosts", () => {
   };
 
   it("sends EAS hosts where an older client does not look, and reads them back", () => {
-    const wire = Schema.encodeSync(DeviceServiceState)(state);
-    // The host summary as clients decoded it before EAS hosts existed.
-    const OlderState = Schema.Struct({
-      hosts: Schema.Array(
-        Schema.Struct({ id: Schema.String, kind: Schema.Literals(["local", "ssh"]) }),
-      ),
-    });
-    expect(Schema.decodeUnknownSync(OlderState)(wire).hosts.map((host) => host.id)).toEqual([
-      "local",
-    ]);
-    expect(Schema.decodeUnknownSync(DeviceServiceState)(wire).hosts).toEqual(state.hosts);
+    const wire = encodeState(state);
+    expect(decodeOlderState(wire).hosts.map((host) => host.id)).toEqual(["local"]);
+    expect(decodeState(wire).hosts).toEqual(state.hosts);
   });
 });

@@ -1087,17 +1087,20 @@ describe("ServerSettings environment icon", () => {
 
 const decodeDeviceHostSettings = Schema.decodeSync(ServerSettings);
 
+// `deviceHosts` as it was decoded before EAS hosts existed: an SSH host needs a target.
+const decodeOlderDeviceHostSettings = Schema.decodeUnknownSync(
+  Schema.Struct({
+    deviceHosts: Schema.Array(Schema.Struct({ id: Schema.String, target: Schema.String })),
+  }),
+);
+
 it("keeps EAS hosts out of the SSH host list servers and clients before EAS hosts decode", () => {
   const settings = decodeDeviceHostSettings({
     deviceHosts: [{ id: "mini", label: "Mac mini", target: "user@mini" }],
     easDeviceHosts: [{ kind: "eas", id: "eas", label: "EAS Simulator" }],
   });
-  const wire = Schema.encodeSync(ServerSettings)(settings);
-  // `deviceHosts` as it was decoded before EAS hosts existed: an SSH host needs a target.
-  const OlderSettings = Schema.Struct({
-    deviceHosts: Schema.Array(Schema.Struct({ id: Schema.String, target: Schema.String })),
-  });
-  expect(Schema.decodeUnknownSync(OlderSettings)(wire).deviceHosts).toEqual([
+  const wire = encodeServerSettings(settings);
+  expect(decodeOlderDeviceHostSettings(wire).deviceHosts).toEqual([
     { id: "mini", target: "user@mini" },
   ]);
   expect(settings.easDeviceHosts.map((host) => host.id)).toEqual(["eas"]);
