@@ -22,6 +22,9 @@ describe("EAS device host settings", () => {
   it("rejects limits EAS does not allow", () => {
     expect(Option.isSome(parseEasDeviceHostDraft(newEasDeviceHost("eas")))).toBe(true);
     expect(
+      Option.isNone(parseEasDeviceHostDraft({ ...newEasDeviceHost("eas"), maxSessionMinutes: 10 })),
+    ).toBe(true);
+    expect(
       Option.isNone(
         parseEasDeviceHostDraft({ ...newEasDeviceHost("eas"), maxSessionMinutes: 600 }),
       ),

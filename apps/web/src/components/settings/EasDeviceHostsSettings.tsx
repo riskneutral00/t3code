@@ -376,7 +376,9 @@ function EasDeviceHostEditor(props: {
               {limit("idleMinutes", "Idle minutes", 60)}
             </div>
             <p className="text-xs text-muted-foreground">
-              Expo allows sessions of up to 40 minutes on free accounts and 115 on paid ones.
+              Expo allows sessions of up to 40 minutes on free accounts and 115 on paid ones, and
+              ends one after the idle minutes without activity, so idle minutes must be smaller than
+              session minutes.
               {props.isNew ? null : " Saving restarts this host, which stops its running sessions."}
             </p>
           </DialogPanel>
