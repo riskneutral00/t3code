@@ -211,17 +211,42 @@ describe("Expo API", () => {
       )
         .stop("session-1")
         .pipe(Effect.flip);
-      // Expo answered and refused the first two: nothing was done. GraphQL
-      // errors at a server error, a transient or internal error, or errors
-      // beside data, may come from a request that ran.
+      const fault = yield* makeExpoApi(
+        respond(
+          Response.json({
+            errors: [{ message: "Something went wrong", extensions: { errorType: "INTERNAL" } }],
+          }),
+        ),
+        credential,
+      )
+        .stop("session-1")
+        .pipe(Effect.flip);
+      const userError = yield* makeExpoApi(
+        respond(
+          Response.json({
+            errors: [
+              { message: "Not allowed", extensions: { errorType: "USER", errorCode: "FORBIDDEN" } },
+            ],
+          }),
+        ),
+        credential,
+      )
+        .stop("session-1")
+        .pipe(Effect.flip);
+      // Expo answered and refused the first two and the user error: nothing
+      // was done. GraphQL errors at a server error, a transient, internal or
+      // other non-user error, or errors beside data, may come from a request
+      // that ran.
       expect([
         graphQl.rejected,
         rejected.rejected,
+        userError.rejected,
         serverError.rejected,
         internalError.rejected,
         transient.rejected,
+        fault.rejected,
         ran.rejected,
-      ]).toEqual([true, true, false, false, false, false]);
+      ]).toEqual([true, true, true, false, false, false, false, false]);
     }),
   );
 });

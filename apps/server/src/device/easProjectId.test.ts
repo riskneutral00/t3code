@@ -138,6 +138,14 @@ it.effect.each([
     expected: Option.some(ID_B),
   },
   {
+    case: "gives no answer when a longer quoted key sits beside a computed project id",
+    files: {
+      "app.config.js": `const defaults = { easProjectId: "${ID_B}" };
+        export default { extra: { eas: { projectId: process.env.EAS_PROJECT_ID ?? defaults.easProjectId } } };`,
+    },
+    expected: Option.none(),
+  },
+  {
     case: "gives no answer when a config builds the project id in a template",
     files: {
       "app.config.js":

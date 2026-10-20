@@ -15,7 +15,7 @@ const JSON_CONFIG_FILES = ["app.config.json", "app.json"];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // A quoted `projectId`. An EAS project id is a UUID; another service's
 // (Firebase's, say) is not, and names no EAS project.
-const QUOTED_PROJECT_ID = /projectId["']?\s*:\s*["'`]([^"'`\n]*)["'`]/gi;
+const QUOTED_PROJECT_ID = /\bprojectId["']?\s*:\s*["'`]([^"'`\n]*)["'`]/gi;
 const PROJECT_ID_MENTION = /\bprojectId\b/gi;
 
 const Extra = Schema.optional(
