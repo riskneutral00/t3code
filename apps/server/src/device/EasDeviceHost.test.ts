@@ -610,11 +610,12 @@ describe("EAS Simulator host", () => {
       // Settings saved while that write is in flight: closing waits for it.
       const listingsBefore = expo.named("T3ActiveEasSimulatorSessions").length;
       const closing = yield* Scope.close(first, Exit.void).pipe(Effect.forkChild);
-      // The close reads the record and lists sessions in real time: wait until
-      // its sweep has listed, then a little more, before looking at it.
-      const pause = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 10)));
-      while (expo.named("T3ActiveEasSimulatorSessions").length === listingsBefore) yield* pause;
-      for (let i = 0; i < 5; i++) yield* pause;
+      // The close reads the record and lists sessions in real time: yield until
+      // its sweep has listed, then a good deal more, before looking at it.
+      while (expo.named("T3ActiveEasSimulatorSessions").length === listingsBefore) {
+        yield* Effect.yieldNow;
+      }
+      for (let i = 0; i < 200; i++) yield* Effect.yieldNow;
       expect(closing.pollUnsafe()).toBeUndefined();
       yield* Deferred.succeed(gate.release, undefined);
       yield* Fiber.join(listing);
