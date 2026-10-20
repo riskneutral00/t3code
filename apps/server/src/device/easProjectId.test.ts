@@ -176,6 +176,27 @@ it.effect.each([
     expected: Option.some(ID_A),
   },
   {
+    case: "gives no answer when a separator inside a comment precedes the rest of the id",
+    files: {
+      "apps/mobile/app.config.ts": `export default {
+        extra: { eas: { projectId: "${ID_A.slice(0, 9)}" // prefix, continued (below)
+          + "${ID_A.slice(9)}" } },
+      };`,
+      "apps/kiosk/app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_B } } } }),
+    },
+    expected: Option.none(),
+  },
+  {
+    case: "gives no answer when a block comment with a separator precedes the rest of the id",
+    files: {
+      "apps/mobile/app.config.ts": `export default {
+        extra: { eas: { projectId: "${ID_A.slice(0, 9)}" /* prefix, (see) */ + "${ID_A.slice(9)}" } },
+      };`,
+      "apps/kiosk/app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_B } } } }),
+    },
+    expected: Option.none(),
+  },
+  {
     case: "gives no answer when a config joins the project id across lines",
     files: {
       "apps/mobile/app.config.ts": `export default {
