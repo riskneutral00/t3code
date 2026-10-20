@@ -509,6 +509,63 @@ describe("EAS Simulator host", () => {
       }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 
+  it.effect("leaves a replacement's session alone once its own scope has closed", () =>
+    Effect.gen(function* () {
+      // One Expo for both instances: they share the record and the account.
+      const expo = fakeExpo();
+      const first = yield* Scope.make();
+      const old = yield* makeHost(expo, config(), first);
+      const oldReady = yield* old.ensureReady(() => Effect.void);
+      const [catalogDevice] = (yield* oldReady.devices.list).devices;
+      expect(yield* oldReady.devices.boot(catalogDevice!)).toBe("session-1");
+      // Settings saved: the old instance goes, a replacement takes its id.
+      yield* Scope.close(first, Exit.void);
+      expect(expo.stopped()).toEqual(["session-1"]);
+      const replacement = yield* makeHost(expo, config(), yield* Scope.make());
+      const ready = yield* replacement.ensureReady(() => Effect.void);
+      const [device] = (yield* ready.devices.list).devices;
+      expect(yield* ready.devices.boot(device!)).toBe("session-2");
+      // A listing still running on the old instance must not sweep the new
+      // session, which it does not own but its replacement does.
+      yield* TestClock.adjust("2 minutes");
+      yield* oldReady.devices.list;
+      expect(expo.stopped()).toEqual(["session-1"]);
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+
+  it.effect("keeps an old record whose session is listed but cannot be stopped", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const server = yield* ServerConfig.ServerConfig;
+      const ledger = path.join(server.stateDir, "device", "eas", "eas.json");
+      yield* fs.makeDirectory(path.dirname(ledger), { recursive: true });
+      yield* fs.writeFileString(
+        ledger,
+        JSON.stringify([
+          { name: "T3 Code · EAS Simulator · old", appId: APP_ID, recordedAt: -181 * 60_000 },
+        ]),
+      );
+      // Expo still lists it (queued for hours, say) and refuses to stop it.
+      const expo = fakeExpo({
+        active: [
+          { id: "old-session", status: "IN_PROGRESS", name: "T3 Code · EAS Simulator · old" },
+        ],
+        failStop: () => true,
+      });
+      const host = yield* makeHost(expo, config({ maxConcurrentSessions: 1 }), yield* Scope.make());
+      const ready = yield* host.ensureReady(() => Effect.void);
+      const [catalogDevice] = (yield* ready.devices.list).devices;
+      // Found and still running: its slot stays taken and its record stays.
+      const refused = yield* ready.devices.boot(catalogDevice!).pipe(Effect.flip);
+      expect(refused.message).toContain("still being cleaned up");
+      const names = (JSON.parse(yield* fs.readFileString(ledger)) as Array<{ name: string }>).map(
+        (entry) => entry.name,
+      );
+      expect(names).toContain("T3 Code · EAS Simulator · old");
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+
   it.effect("stops the session a refused create made anyway", () =>
     Effect.gen(function* () {
       // Expo refuses the create but lists a session by its name.

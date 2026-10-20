@@ -151,6 +151,10 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
   // Bumped whenever the host stops its sessions, so a start that finishes
   // afterwards stops its own session instead of leaving it untracked.
   let epoch = 0;
+  // Set once the host's scope closes. A listing still running on this
+  // instance then neither sweeps nor writes the ledger: a replacement with
+  // the same id owns the sessions and the record now.
+  let closed = false;
   let reapedAt = 0;
   let ready: DeviceHost.DeviceHostReady | null = null;
 
@@ -187,6 +191,7 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
   const writeLedger = Effect.fn("EasDeviceHost.writeLedger")(function* (
     update: (entries: ReadonlyArray<LedgerEntry>) => ReadonlyArray<LedgerEntry>,
   ) {
+    if (closed) return yield* unavailable(`${config.label} was replaced or removed.`);
     const entries = update(yield* readLedger);
     yield* writeFileStringAtomically({
       filePath: ledgerPath,
@@ -316,6 +321,7 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
    */
   const reapLeftovers = Effect.fn("EasDeviceHost.reapLeftovers")(
     function* (expo: ExpoApi) {
+      if (closed) return;
       reapedAt = yield* Clock.currentTimeMillis;
       const entries = yield* readLedger;
       const owned = ownedNames();
@@ -571,6 +577,7 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
    * tracks are reaped now and then.
    */
   const dropEnded = Effect.gen(function* () {
+    if (closed) return;
     const now = yield* Clock.currentTimeMillis;
     const stale = [...sessions.values()].filter(
       (session) =>
@@ -812,7 +819,15 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
     // Also stop a recorded session a create with an unknown outcome made after all.
     yield* reapLeftovers(expo);
   }).pipe(Effect.ignore);
-  yield* Effect.addFinalizer(() => stopAll);
+  yield* Effect.addFinalizer(() =>
+    stopAll.pipe(
+      Effect.andThen(
+        Effect.sync(() => {
+          closed = true;
+        }),
+      ),
+    ),
+  );
 
   const platformAvailability = (platform: DevicePlatform) =>
     Effect.succeed(
