@@ -156,6 +156,26 @@ it.effect.each([
     expected: Option.none(),
   },
   {
+    case: "gives no answer when a config joins the project id around a comment",
+    files: {
+      "apps/mobile/app.config.ts": `export default {
+        extra: { eas: { projectId: "${ID_A.slice(0, 9)}" /* prefix */ + "${ID_A.slice(9)}" } },
+      };`,
+      "apps/kiosk/app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_B } } } }),
+    },
+    expected: Option.none(),
+  },
+  {
+    case: "reads a project id a comment follows",
+    files: {
+      "app.config.ts": `export default {
+        extra: { eas: { projectId: "${ID_A}" /* production */ // the only one
+        } },
+      };`,
+    },
+    expected: Option.some(ID_A),
+  },
+  {
     case: "gives no answer when a config joins the project id across lines",
     files: {
       "apps/mobile/app.config.ts": `export default {
