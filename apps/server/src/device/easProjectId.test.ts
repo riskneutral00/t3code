@@ -265,6 +265,16 @@ it.effect.each([
     expected: Option.none(),
   },
   {
+    case: "gives no answer when the config is assigned over from defaults that name the project id",
+    files: {
+      "app.config.js": `module.exports = Object.assign(
+        { name: "Mobile", extra: { eas: { projectId: "${ID_A}" } } },
+        require("./app.config.local.js"),
+      );`,
+    },
+    expected: Option.none(),
+  },
+  {
     case: "reads a project id that follows spreads",
     files: {
       "app.config.js": `export default ({ config }) => ({

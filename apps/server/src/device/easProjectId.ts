@@ -29,11 +29,14 @@ const MAX_CONFIG_LENGTH = 256 * 1024;
 // quadratic; an app config mentions its project a few times at most.
 const MAX_MENTIONS = 32;
 
-// Text after an entry that may replace it from elsewhere: a spread, or
-// Object.assign. Anywhere after it, at any depth, since a spread in an
-// enclosing object replaces the entry too, and a comment or string could
-// hide a brace from a scan of the entry's own object.
-const REPLACES_LATER = /\.\.\.|\bObject\s*\.\s*assign\b|\bassign\s*\(/;
+// A spread after an entry may replace it from elsewhere: anywhere after it,
+// at any depth, since a spread in an enclosing object replaces the entry
+// too, and a comment or string could hide a brace from a scan of the
+// entry's own object. An assignment over the config may replace it from
+// anywhere: `Object.assign(defaults, overrides)` names the call before
+// both arguments.
+const SPREAD_LATER = /\.\.\./;
+const ASSIGNS_OVER = /\bObject\s*\.\s*assign\b|\bassign\s*\(/;
 
 const Extra = Schema.optional(
   Schema.Struct({
@@ -77,11 +80,12 @@ const projectIdsOf = Effect.fn("easProjectId.projectIdsOf")(function* (dir: stri
     const entries = [...source.matchAll(QUOTED_PROJECT_ID)];
     const quoted = entries.map((match) => match[1]!);
     // A template that interpolates could be any project too, and so could
-    // one a spread or Object.assign after the entry replaces.
+    // one a spread after the entry, or an assignment anywhere, replaces.
     if (
       quoted.length !== mentions ||
       quoted.some((id) => id.includes("${")) ||
-      entries.some((match) => REPLACES_LATER.test(source.slice(match.index + match[0].length)))
+      ASSIGNS_OVER.test(source) ||
+      entries.some((match) => SPREAD_LATER.test(source.slice(match.index + match[0].length)))
     ) {
       return null;
     }
