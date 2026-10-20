@@ -36,9 +36,28 @@ const MAX_MENTIONS = 32;
 // anywhere: `Object.assign(defaults, overrides)` names the call before
 // both arguments.
 const SPREAD_LATER = /\.\.\./;
-// A dynamic config that names no id runs after app.json's entry, so a spread
-// of anything but the config Expo hands it may replace that entry too.
-const FOREIGN_SPREAD = /\.\.\.\s*\(?\s*(?!config\b)[\w$]/;
+// Space, a comment, or an opening parenthesis: what may sit between `...`
+// and the thing spread.
+const SPREAD_FILLER = /^(?:\s+|\/\/[^\n\r\u2028\u2029]*|\/\*(?:[^*]|\*(?!\/))*\*\/|\()/;
+
+/**
+ * Whether every spread in a config spreads `config`, the one Expo hands it.
+ * A dynamic config that names no id runs after app.json's entry, so a
+ * spread of anything else may replace that entry; only `config` and its
+ * parts are known not to.
+ */
+const spreadsOnlyConfig = (source: string): boolean => {
+  for (const spread of source.matchAll(/\.\.\./g)) {
+    let at = spread.index + 3;
+    for (;;) {
+      const filler = SPREAD_FILLER.exec(source.slice(at));
+      if (!filler) break;
+      at += filler[0].length;
+    }
+    if (!/^config\b/.test(source.slice(at))) return false;
+  }
+  return true;
+};
 const ASSIGNS_OVER = /\bObject\s*\.\s*assign\b|\bassign\s*\(/;
 
 const Extra = Schema.optional(
@@ -90,7 +109,7 @@ const projectIdsOf = Effect.fn("easProjectId.projectIdsOf")(function* (dir: stri
       quoted.some((id) => id.includes("${")) ||
       ASSIGNS_OVER.test(source) ||
       entries.some((match) => SPREAD_LATER.test(source.slice(match.index + match[0].length))) ||
-      (entries.length === 0 && FOREIGN_SPREAD.test(source))
+      (entries.length === 0 && !spreadsOnlyConfig(source))
     ) {
       return null;
     }
