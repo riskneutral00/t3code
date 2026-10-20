@@ -172,20 +172,24 @@ const toExpoApiError = (
   const status =
     reason._tag === "TransportError" || reason._tag === "ResponseError" ? reason.status : undefined;
   // Expo refused: a request it never got, a 4xx, or GraphQL errors at a 2xx
-  // or 4xx before it ran anything. GraphQL errors at a 5xx, beside `data`
-  // (the request ran), or marked as Expo's own fault (`isTransient`, an
-  // `errorType` other than USER, or an internal `errorCode`; eas-cli reads
-  // these) came from a request that may have run.
+  // or 4xx that are the user's fault. Expo marks those `errorType: "USER"`
+  // and not `isTransient` (eas-cli's rule; Apollo's `code` says nothing, as
+  // Expo puts INTERNAL_SERVER_ERROR on user errors too) and answers them with
+  // `data: null`, since its mutations are non-null. GraphQL errors at a 5xx,
+  // beside data (the request ran), or that are Expo's own fault came from a
+  // request that may have run.
+  const errors = reason._tag === "ResponseError" ? reason.errors : [];
+  const fault = errors.some(
+    ({ extensions }) =>
+      extensions?.isTransient === true ||
+      (extensions?.errorType !== undefined && extensions.errorType !== "USER") ||
+      extensions?.errorCode === "INTERNAL_SERVER_ERROR",
+  );
+  const usersFault =
+    errors.length > 0 && errors.every(({ extensions }) => extensions?.errorType === "USER");
   const uncertain =
     reason._tag === "ResponseError" &&
-    (reason.data !== undefined ||
-      reason.errors.some(
-        ({ extensions }) =>
-          extensions?.isTransient === true ||
-          (extensions?.errorType !== undefined && extensions.errorType !== "USER") ||
-          extensions?.errorCode === "INTERNAL_SERVER_ERROR" ||
-          extensions?.code === "INTERNAL_SERVER_ERROR",
-      ));
+    (fault || (reason.data !== undefined && !(reason.data === null && usersFault)));
   const rejected =
     reason._tag === "EncodeError" ||
     (status !== undefined &&

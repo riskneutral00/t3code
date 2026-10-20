@@ -165,6 +165,25 @@ it.effect.each([
     expected: Option.none(),
   },
   {
+    case: "gives no answer when an app.json Expo reads as JSON5 cannot be decoded here",
+    files: {
+      "apps/mobile/app.json": `{
+        // the mobile app
+        "expo": { "extra": { "eas": { "projectId": "${ID_B}" } }, },
+      }`,
+      "apps/admin/app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_A } } } }),
+    },
+    expected: Option.none(),
+  },
+  {
+    case: "reads only the first static config, like Expo",
+    files: {
+      "app.config.json": JSON.stringify({ expo: { name: "Mobile" } }),
+      "app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_A } } } }),
+    },
+    expected: Option.none(),
+  },
+  {
     case: "reads a static config that is not wrapped in `expo`",
     files: {
       "apps/mobile/app.config.json": JSON.stringify({ extra: { eas: { projectId: ID_A } } }),

@@ -25,7 +25,8 @@ const Extra = Schema.optional(
     eas: Schema.optional(Schema.Struct({ projectId: Schema.optional(Schema.String) })),
   }),
 );
-// Expo reads a static config wrapped in `expo` or not.
+// Expo reads a static config wrapped in `expo` or not, and as JSON5; one
+// this cannot decode (comments, say) still names a project, unknown here.
 const decodeAppJson = Schema.decodeUnknownOption(
   Schema.fromJsonString(
     Schema.Struct({ expo: Schema.optional(Schema.Struct({ extra: Extra })), extra: Extra }),
@@ -70,14 +71,13 @@ const projectIdsOf = Effect.fn("easProjectId.projectIdsOf")(function* (dir: stri
     );
     // A config that is there but cannot be read could name any project.
     if (json === null) return null;
-    const id = Option.flatMap(json, decodeAppJson).pipe(
-      Option.flatMap((value) => Option.fromNullishOr((value.expo ?? value).extra?.eas?.projectId)),
-      Option.filter((id) => UUID.test(id)),
-    );
-    if (Option.isSome(id)) {
-      ids.push(id.value.toLowerCase());
-      break;
-    }
+    if (Option.isNone(json)) continue;
+    const decoded = decodeAppJson(json.value);
+    if (Option.isNone(decoded)) return null;
+    const id = (decoded.value.expo ?? decoded.value).extra?.eas?.projectId;
+    if (id !== undefined && UUID.test(id)) ids.push(id.toLowerCase());
+    // Expo reads only the first static config it finds.
+    break;
   }
   return ids;
 });

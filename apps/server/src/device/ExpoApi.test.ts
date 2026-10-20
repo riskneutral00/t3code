@@ -171,11 +171,37 @@ describe("Expo API", () => {
       expect(serverError.message).toBe(
         "Expo could not stop a simulator session: Internal server error",
       );
+      // What Expo answers a refused request with: Apollo's default code, the
+      // user's fault, and null data.
+      const expoRefusal = yield* makeExpoApi(
+        respond(
+          Response.json({
+            errors: [
+              {
+                message: "Experience with id 0000 does not exist.",
+                extensions: {
+                  code: "INTERNAL_SERVER_ERROR",
+                  errorCode: "EXPERIENCE_NOT_FOUND",
+                  errorType: "USER",
+                  isTransient: false,
+                },
+              },
+            ],
+            data: null,
+          }),
+        ),
+        credential,
+      )
+        .stop("session-1")
+        .pipe(Effect.flip);
       const internalError = yield* makeExpoApi(
         respond(
           Response.json({
             errors: [
-              { message: "Something went wrong", extensions: { code: "INTERNAL_SERVER_ERROR" } },
+              {
+                message: "Something went wrong",
+                extensions: { errorCode: "INTERNAL_SERVER_ERROR" },
+              },
             ],
           }),
         ),
@@ -233,20 +259,20 @@ describe("Expo API", () => {
       )
         .stop("session-1")
         .pipe(Effect.flip);
-      // Expo answered and refused the first two and the user error: nothing
-      // was done. GraphQL errors at a server error, a transient, internal or
-      // other non-user error, or errors beside data, may come from a request
-      // that ran.
+      // Expo answered and refused the first three: nothing was done. GraphQL
+      // errors at a server error, a transient, internal or other non-user
+      // error, or errors beside data, may come from a request that ran.
       expect([
         graphQl.rejected,
         rejected.rejected,
         userError.rejected,
+        expoRefusal.rejected,
         serverError.rejected,
         internalError.rejected,
         transient.rejected,
         fault.rejected,
         ran.rejected,
-      ]).toEqual([true, true, true, false, false, false, false, false]);
+      ]).toEqual([true, true, true, true, false, false, false, false, false]);
     }),
   );
 });
