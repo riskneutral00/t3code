@@ -132,7 +132,8 @@ it.effect.each([
   {
     case: "uses app.json when the config only mentions a longer identifier",
     files: {
-      "app.config.js": `const easProjectIds = {}; export default { name: "Mobile", easProjectIds };`,
+      "app.config.js": `const easProjectIds = {};
+        export default ({ config }) => ({ ...config, name: "Mobile", easProjectIds });`,
       "app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_B } } } }),
     },
     expected: Option.some(ID_B),
@@ -314,6 +315,14 @@ it.effect.each([
     expected: Option.none(),
   },
   {
+    case: "gives no answer when a dynamic config spreads nothing, since Expo then ignores app.json",
+    files: {
+      "app.config.js": `export default { name: "Mobile", slug: "mobile" };`,
+      "app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_A } } } }),
+    },
+    expected: Option.none(),
+  },
+  {
     case: "reads app.json's project id through a config that only spreads the config itself",
     files: {
       "app.config.js": `module.exports = ({ config }) => ({
@@ -425,6 +434,31 @@ it.effect.each(["\r", "\u2028", "\u2029"])(
       });
       expect(yield* findEasProjectId(root)).toEqual(Option.none());
     }).pipe(Effect.scoped, Effect.provide(layer)),
+);
+
+it.effect.each([
+  {
+    case: "a long run of spaces after a spread",
+    source: `({ config }) => ({ ...${" ".repeat(255 * 1024)}config })`,
+  },
+  {
+    case: "many spreads inside one comment",
+    source: `({ config }) => ({ .../*${".../*".repeat(30_000)}*/config })`,
+  },
+  {
+    case: "many spreads inside line comments",
+    source: `({ config }) => ({ ...//${" ...//".repeat(30_000)}\nconfig })`,
+  },
+])("reads $case at once", ({ source }) =>
+  Effect.gen(function* () {
+    const root = yield* workspace({
+      "app.config.js": `module.exports = ${source};`,
+      "app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_A } } } }),
+    });
+    const startedAt = performance.now();
+    expect(yield* findEasProjectId(root)).toEqual(Option.some(ID_A));
+    expect(performance.now() - startedAt).toBeLessThan(10_000);
+  }).pipe(Effect.scoped, Effect.provide(layer)),
 );
 
 it.effect("gives no answer at once for a config with more entries than one can have", () =>

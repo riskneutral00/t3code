@@ -37,26 +37,35 @@ const MAX_MENTIONS = 32;
 // both arguments.
 const SPREAD_LATER = /\.\.\./;
 // Space, a comment, or an opening parenthesis: what may sit between `...`
-// and the thing spread.
-const SPREAD_FILLER = /^(?:\s+|\/\/[^\n\r\u2028\u2029]*|\/\*(?:[^*]|\*(?!\/))*\*\/|\()/;
+// and the thing spread. Sticky, so the scan moves through the file once.
+const SPREAD_FILLER = /(?:\s+|\/\/[^\n\r\u2028\u2029]*|\/\*(?:[^*]|\*(?!\/))*\*\/|\()/y;
+const CONFIG_AT = /config\b/y;
 
 /**
- * Whether every spread in a config spreads `config`, the one Expo hands it.
- * A dynamic config that names no id runs after app.json's entry, so a
- * spread of anything else may replace that entry; only `config` and its
- * parts are known not to.
+ * How a dynamic config with no EAS id of its own relates to app.json's:
+ * `spreads` when every spread in it spreads `config`, the one Expo hands it
+ * (app.json's entry carries through); `replaces` when it spreads anything
+ * else, which may replace that entry; `ignores` when it spreads nothing,
+ * since Expo then uses the dynamic config alone. A `...` inside a comment
+ * after a spread is skipped with the comment, so the scan is linear.
  */
-const spreadsOnlyConfig = (source: string): boolean => {
-  for (const spread of source.matchAll(/\.\.\./g)) {
-    let at = spread.index + 3;
+const staticConfigUse = (source: string): "spreads" | "replaces" | "ignores" => {
+  let spreads = 0;
+  let at = 0;
+  for (;;) {
+    const next = source.indexOf("...", at);
+    if (next === -1) return spreads > 0 ? "spreads" : "ignores";
+    spreads++;
+    at = next + 3;
     for (;;) {
-      const filler = SPREAD_FILLER.exec(source.slice(at));
+      SPREAD_FILLER.lastIndex = at;
+      const filler = SPREAD_FILLER.exec(source);
       if (!filler) break;
       at += filler[0].length;
     }
-    if (!/^config\b/.test(source.slice(at))) return false;
+    CONFIG_AT.lastIndex = at;
+    if (!CONFIG_AT.test(source)) return "replaces";
   }
-  return true;
 };
 const ASSIGNS_OVER = /\bObject\s*\.\s*assign\b|\bassign\s*\(/;
 
@@ -103,15 +112,20 @@ const projectIdsOf = Effect.fn("easProjectId.projectIdsOf")(function* (dir: stri
     const quoted = entries.map((match) => match[1]!);
     // A template that interpolates could be any project too, and so could
     // one a spread after the entry, or an assignment anywhere, replaces;
-    // with no EAS id here, app.json's is the one a foreign spread replaces.
     if (
       quoted.length !== mentions ||
       quoted.some((id) => id.includes("${")) ||
       ASSIGNS_OVER.test(source) ||
-      entries.some((match) => SPREAD_LATER.test(source.slice(match.index + match[0].length))) ||
-      (!quoted.some((id) => UUID.test(id)) && !spreadsOnlyConfig(source))
+      entries.some((match) => SPREAD_LATER.test(source.slice(match.index + match[0].length)))
     ) {
       return null;
+    }
+    if (!quoted.some((id) => UUID.test(id))) {
+      const use = staticConfigUse(source);
+      if (use === "replaces") return null;
+      // Expo uses a dynamic config that spreads nothing on its own: app.json's
+      // entry names nothing for this app.
+      if (use === "ignores") return ids;
     }
     ids.push(...quoted.filter((id) => UUID.test(id)).map((id) => id.toLowerCase()));
   }
