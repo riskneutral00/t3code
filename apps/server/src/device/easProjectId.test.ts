@@ -197,6 +197,24 @@ it.effect.each([
     expected: Option.none(),
   },
   {
+    case: "gives no answer when a spread after the project id may replace it",
+    files: {
+      "apps/mobile/app.config.js": `import { eas } from "./app.shared.js";
+        export default { extra: { eas: { projectId: "${ID_A}", ...eas } } };`,
+    },
+    expected: Option.none(),
+  },
+  {
+    case: "reads a project id that follows spreads",
+    files: {
+      "app.config.js": `export default ({ config }) => ({
+        ...config,
+        extra: { ...config.extra, eas: { ...(config.extra?.eas ?? {}), projectId: "${ID_A}" } },
+      });`,
+    },
+    expected: Option.some(ID_A),
+  },
+  {
     case: "gives no answer when a config joins the project id across lines",
     files: {
       "apps/mobile/app.config.ts": `export default {
@@ -272,6 +290,21 @@ it.effect("reads app.config.json like app.json", () =>
     });
     expect(yield* findEasProjectId(root)).toEqual(Option.some(ID_B));
   }).pipe(Effect.scoped, Effect.provide(layer)),
+);
+
+it.effect.each(["\r", "\u2028", "\u2029"])(
+  "gives no answer when a comment ending in %o precedes the rest of a joined id",
+  (terminator) =>
+    Effect.gen(function* () {
+      // A line comment ends at any ECMAScript line terminator, not only LF.
+      const root = yield* workspace({
+        "apps/mobile/app.config.ts":
+          `export default { extra: { eas: { projectId: "${ID_A.slice(0, 9)}" // prefix${terminator}` +
+          `+ "${ID_A.slice(9)}" } } };`,
+        "apps/kiosk/app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_B } } } }),
+      });
+      expect(yield* findEasProjectId(root)).toEqual(Option.none());
+    }).pipe(Effect.scoped, Effect.provide(layer)),
 );
 
 it.effect("answers at once for a long comment before the rest of a joined id", () =>

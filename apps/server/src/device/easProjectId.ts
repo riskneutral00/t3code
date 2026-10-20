@@ -20,8 +20,22 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // inside one cannot end the entry. An EAS project id is a UUID; another
 // service's (Firebase's, say) is not, and names no EAS project.
 const QUOTED_PROJECT_ID =
-  /\bprojectId["']?\s*:\s*["'`]([^"'`\n]*)["'`](?=(?:\s|\/\/[^\n]*(?:\n|$)|\/\*(?:[^*]|\*(?!\/))*\*\/)*(?:[,;})\]]|$))/gi;
+  /\bprojectId["']?\s*:\s*["'`]([^"'`\n]*)["'`](?=(?:\s|\/\/[^\n\r\u2028\u2029]*(?:[\n\r\u2028\u2029]|$)|\/\*(?:[^*]|\*(?!\/))*\*\/)*(?:[,;})\]]|$))/gi;
 const PROJECT_ID_MENTION = /\bprojectId\b/gi;
+
+/** Whether a spread follows the entry at `from` in its object, which may replace it. */
+const spreadFollows = (source: string, from: number): boolean => {
+  let depth = 0;
+  for (let i = from; i < source.length; i++) {
+    const char = source[i];
+    if (char === "{" || char === "(" || char === "[") depth++;
+    else if (char === "}" || char === ")" || char === "]") {
+      if (depth === 0) return false;
+      depth--;
+    } else if (depth === 0 && source.startsWith("...", i)) return true;
+  }
+  return false;
+};
 
 const Extra = Schema.optional(
   Schema.Struct({
@@ -60,9 +74,17 @@ const projectIdsOf = Effect.fn("easProjectId.projectIdsOf")(function* (dir: stri
     // variable, or assigned later, could be any project, and makes the
     // answer unknown.
     const mentions = source.match(PROJECT_ID_MENTION)?.length ?? 0;
-    const quoted = [...source.matchAll(QUOTED_PROJECT_ID)].map((match) => match[1]!);
-    // A template that interpolates could be any project too.
-    if (quoted.length !== mentions || quoted.some((id) => id.includes("${"))) return null;
+    const entries = [...source.matchAll(QUOTED_PROJECT_ID)];
+    const quoted = entries.map((match) => match[1]!);
+    // A template that interpolates could be any project too, and so could a
+    // spread after the entry in its object.
+    if (
+      quoted.length !== mentions ||
+      quoted.some((id) => id.includes("${")) ||
+      entries.some((match) => spreadFollows(source, match.index + match[0].length))
+    ) {
+      return null;
+    }
     ids.push(...quoted.filter((id) => UUID.test(id)).map((id) => id.toLowerCase()));
   }
   for (const file of JSON_CONFIG_FILES) {
