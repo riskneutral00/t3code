@@ -213,6 +213,14 @@ it.effect.each([
     expected: Option.none(),
   },
   {
+    case: "gives no answer when a spread at the top of the config may replace the project id",
+    files: {
+      "apps/mobile/app.config.js": `import { brand } from "./app.shared.js";
+        export default { extra: { eas: { projectId: "${ID_A}" } }, ...brand };`,
+    },
+    expected: Option.none(),
+  },
+  {
     case: "gives no answer when a spread in an enclosing object may replace the project id",
     files: {
       "apps/mobile/app.config.js": `import { extraOverrides } from "./app.shared.js";
@@ -332,6 +340,21 @@ it.effect.each(["\r", "\u2028", "\u2029"])(
       });
       expect(yield* findEasProjectId(root)).toEqual(Option.none());
     }).pipe(Effect.scoped, Effect.provide(layer)),
+);
+
+it.effect("gives no answer at once for a config with more entries than one can have", () =>
+  Effect.gen(function* () {
+    // Just under the size bound, every entry followed by an unterminated
+    // comment would still take seconds; the entry count stops it first.
+    const entry = `projectId: "${ID_A.slice(0, 9)}" /* `;
+    const root = yield* workspace({
+      "apps/mobile/app.config.ts": entry.repeat(Math.floor((255 * 1024) / entry.length)),
+      "apps/kiosk/app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_B } } } }),
+    });
+    const startedAt = performance.now();
+    expect(yield* findEasProjectId(root)).toEqual(Option.none());
+    expect(performance.now() - startedAt).toBeLessThan(10_000);
+  }).pipe(Effect.scoped, Effect.provide(layer)),
 );
 
 it.effect("gives no answer at once for a config too large to be one", () =>

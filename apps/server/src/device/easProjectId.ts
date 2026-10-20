@@ -25,6 +25,9 @@ const PROJECT_ID_MENTION = /\bprojectId\b/gi;
 // Reading a config is linear in its size per entry; one this large is not an
 // app config but a file made to keep the server busy.
 const MAX_CONFIG_LENGTH = 256 * 1024;
+// Each entry is read against the rest of the file, so a file with many is
+// quadratic; an app config mentions its project a few times at most.
+const MAX_MENTIONS = 32;
 
 // Text after an entry that may replace it from elsewhere: a spread, or
 // Object.assign. Anywhere after it, at any depth, since a spread in an
@@ -70,6 +73,7 @@ const projectIdsOf = Effect.fn("easProjectId.projectIdsOf")(function* (dir: stri
     // answer unknown.
     if (source.length > MAX_CONFIG_LENGTH) return null;
     const mentions = source.match(PROJECT_ID_MENTION)?.length ?? 0;
+    if (mentions > MAX_MENTIONS) return null;
     const entries = [...source.matchAll(QUOTED_PROJECT_ID)];
     const quoted = entries.map((match) => match[1]!);
     // A template that interpolates could be any project too, and so could
