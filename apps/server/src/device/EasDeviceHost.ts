@@ -86,6 +86,9 @@ const REAP_INTERVAL_MS = 60_000;
 // list (not showing yet, or past the first page) is only forgotten once it
 // cannot be running any more.
 const RECORD_LIFETIME_MS = 120 * 60_000;
+// Expo lists a session it made within seconds; a create with an unknown
+// outcome stops counting against the limit once it has had this long.
+const UNCERTAIN_CREATE_MS = 5 * 60_000;
 // One failed request to Expo during a minutes-long start does not end the start.
 const TRANSIENT_RETRY = { times: 3, schedule: Schedule.spaced("2 seconds") } as const;
 const decodePreviewApi = Schema.decodeUnknownEffect(Schema.Struct({ device: Schema.String }));
@@ -126,11 +129,16 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
   // them alone and they count against the limit.
   const starting = new Set<string>();
   const unresolved = new Map<string, { readonly sessionId: string }>();
+  // Creates whose outcome is unknown (no answer, or a server error): Expo may
+  // have made the session. Each listing looks for it, and it counts against
+  // the limit until found or until Expo would have listed it by now.
+  const uncertain = new Map<string, { readonly entry: LedgerEntry; readonly until: number }>();
   const ownedNames = () =>
     new Set([
       ...[...sessions.values()].map((session) => session.name),
       ...starting,
       ...unresolved.keys(),
+      ...uncertain.keys(),
     ]);
   // Bumped whenever the host stops its sessions, so a start that finishes
   // afterwards stops its own session instead of leaving it untracked.
@@ -203,8 +211,9 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
     );
 
   /** Finds recorded sessions by name, so a session whose id never arrived is found too. */
-  const stopRecorded = (expo: ExpoApi, entries: ReadonlyArray<LedgerEntry>) =>
-    Effect.forEach(
+  const stopRecorded = (expo: ExpoApi, entries: ReadonlyArray<LedgerEntry>) => {
+    const found = new Set<string>();
+    return Effect.forEach(
       [...new Set(entries.map((entry) => entry.appId))],
       (appId) =>
         expo.activeSessions(appId).pipe(
@@ -215,6 +224,7 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
                 Effect.gen(function* () {
                   const running = active.filter((session) => session.name === entry.name);
                   if (running.length > 0) {
+                    found.add(entry.name);
                     return yield* Effect.forEach(
                       running,
                       (session) =>
@@ -239,6 +249,43 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
           Effect.ignore,
         ),
       { discard: true, concurrency: 4 },
+    ).pipe(Effect.as(found as ReadonlySet<string>));
+  };
+
+  /**
+   * Retries the stop of a session whose stop failed. A session Expo already
+   * ended is let go even if stopping it keeps failing.
+   */
+  const retryUnresolved = (expo: ExpoApi, name: string, sessionId: string) =>
+    stopSession(expo, sessionId, name).pipe(
+      Effect.catch(() =>
+        expo
+          .session(sessionId)
+          .pipe(
+            Effect.flatMap((current) =>
+              current.status === "STOPPED" || current.status === "ERRORED"
+                ? forgetEntry(name)
+                : Effect.fail(current.status),
+            ),
+          ),
+      ),
+      Effect.andThen(Effect.sync(() => void unresolved.delete(name))),
+      Effect.ignore,
+    );
+
+  /** Looks for sessions creates with an unknown outcome may have made. */
+  const resolveUncertain = (expo: ExpoApi, now: number) =>
+    Effect.forEach(
+      [...uncertain],
+      ([name, { entry, until }]) =>
+        stopRecorded(expo, [entry]).pipe(
+          Effect.map((found) => {
+            // Found (stopped, or unresolved if that failed) or long enough
+            // unlisted: the slot frees, and the record stays for the reaper.
+            if (found.has(name) || now > until) uncertain.delete(name);
+          }),
+        ),
+      { discard: true },
     );
 
   /** Sessions a previous server, or a start that failed, recorded but this host does not own. */
@@ -310,12 +357,13 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
   const reserveSlot = (name: string) =>
     startLock.withPermit(
       Effect.suspend(() => {
-        if (sessions.size + starting.size + unresolved.size >= config.maxConcurrentSessions) {
+        const pending = unresolved.size + uncertain.size;
+        if (sessions.size + starting.size + pending >= config.maxConcurrentSessions) {
           const limit = `${config.label} is limited to ${config.maxConcurrentSessions} running ${config.maxConcurrentSessions === 1 ? "session" : "sessions"}.`;
           return Effect.fail(
             unavailable(
-              unresolved.size > 0
-                ? `${limit} Stopping ${unresolved.size === 1 ? "a session" : `${unresolved.size} sessions`} failed and is being retried; try again shortly.`
+              pending > 0
+                ? `${limit} ${pending === 1 ? "A session" : `${pending} sessions`} that failed to start or stop ${pending === 1 ? "is" : "are"} still being cleaned up; try again shortly.`
                 : `${limit} Close one in the Device panel first.`,
             ),
           );
@@ -378,9 +426,24 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
                     maxIdleTimeMinutes: config.idleMinutes,
                   })
                   .pipe(
-                    // Expo may have made the session before failing to answer. If
-                    // it does not list it yet, the record stays for the reaper.
-                    Effect.tapError(() => stopRecorded(expo, [entry])),
+                    // Unless Expo refused, it may have made the session before
+                    // failing to answer. Unlisted, it stays counted for a while.
+                    Effect.tapError((error) =>
+                      error.rejected
+                        ? forgetEntry(name)
+                        : stopRecorded(expo, [entry]).pipe(
+                            Effect.flatMap((found) =>
+                              found.has(name)
+                                ? Effect.void
+                                : Effect.map(Clock.currentTimeMillis, (now) => {
+                                    uncertain.set(name, {
+                                      entry,
+                                      until: now + UNCERTAIN_CREATE_MS,
+                                    });
+                                  }),
+                            ),
+                          ),
+                    ),
                     Effect.mapError((error) => unavailable(error.message, error)),
                   );
                 return yield* restore(trackSession(expo, sessionId, name, startedIn)).pipe(
@@ -461,18 +524,15 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
         session.stopping || now - (checkedAt.get(session.sessionId) ?? 0) > STATUS_TTL_MS,
     );
     const reapDue = now - reapedAt > REAP_INTERVAL_MS;
-    if (stale.length === 0 && unresolved.size === 0 && !reapDue) return;
+    if (stale.length === 0 && unresolved.size === 0 && uncertain.size === 0 && !reapDue) return;
     if (reapDue) reapedAt = now;
     const expo = yield* api;
     yield* Effect.forEach(
       [...unresolved],
-      ([name, { sessionId }]) =>
-        stopSession(expo, sessionId, name).pipe(
-          Effect.andThen(Effect.sync(() => void unresolved.delete(name))),
-          Effect.ignore,
-        ),
+      ([name, { sessionId }]) => retryUnresolved(expo, name, sessionId),
       { discard: true, concurrency: 4 },
     );
+    yield* resolveUncertain(expo, now);
     yield* Effect.forEach(
       stale,
       (session) =>
@@ -669,14 +729,12 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
     );
     yield* Effect.forEach(
       [...unresolved],
-      ([name, { sessionId }]) =>
-        stopSession(expo, sessionId, name).pipe(
-          Effect.andThen(Effect.sync(() => void unresolved.delete(name))),
-          Effect.ignore,
-        ),
+      ([name, { sessionId }]) => retryUnresolved(expo, name, sessionId),
       { discard: true, concurrency: 4 },
     );
-    // Also stop a recorded session a create that timed out made after all.
+    // Also stop a recorded session a create with an unknown outcome made
+    // after all; the reaper skips names the host still owns.
+    uncertain.clear();
     yield* reapLeftovers(expo);
   }).pipe(Effect.ignore);
   yield* Effect.addFinalizer(() => stopAll);

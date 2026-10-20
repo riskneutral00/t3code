@@ -50,12 +50,14 @@ const fakeExpo = (
     readonly createGate?: Gate;
     readonly activeIncludesCreated?: boolean;
     readonly failPreview?: boolean;
+    readonly omitCreatedFromActive?: boolean;
   } = {},
 ) => {
   const calls: Array<{ operation: string; variables: Record<string, unknown> }> = [];
   let created = 0;
   let createdName = "";
   let previewFails = options.failPreview ?? false;
+  let createFails = options.failCreate ?? false;
   const http = HttpClient.make((request) =>
     Effect.gen(function* () {
       const url = new URL(request.url);
@@ -86,7 +88,7 @@ const fakeExpo = (
           yield* Deferred.succeed(options.createGate.requested, undefined);
           yield* Deferred.await(options.createGate.release);
         }
-        if (options.failCreate)
+        if (createFails)
           return HttpClientResponse.fromWeb(request, new Response("bad gateway", { status: 502 }));
       }
       if (operation === "T3StopEasSimulatorSession" && options.failStop?.()) {
@@ -112,7 +114,9 @@ const fakeExpo = (
                     byId: {
                       deviceRunSessionsPaginated: {
                         edges: [
-                          { node: { id: "orphan", status: "NEW", name: createdName } },
+                          ...(options.omitCreatedFromActive
+                            ? []
+                            : [{ node: { id: "orphan", status: "NEW", name: createdName } }]),
                           {
                             node: {
                               id: "someone-else",
@@ -166,7 +170,10 @@ const fakeExpo = (
   const allowPreview = () => {
     previewFails = false;
   };
-  return { http, named, stopped, allowPreview };
+  const allowCreate = () => {
+    createFails = false;
+  };
+  return { http, named, stopped, allowPreview, allowCreate };
 };
 
 const layer = Layer.mergeAll(
@@ -471,7 +478,7 @@ describe("EAS Simulator host", () => {
       while (failing.pollUnsafe() === undefined) yield* TestClock.adjust("1 second");
       yield* Fiber.join(failing);
       const refused = yield* ready.devices.boot(catalogDevice!).pipe(Effect.flip);
-      expect(refused.message).toContain("failed and is being retried");
+      expect(refused.message).toContain("still being cleaned up");
       expect(expo.named("T3CreateEasSimulatorSession")).toHaveLength(1);
       stopFails = false;
       yield* ready.devices.list;
@@ -489,6 +496,45 @@ describe("EAS Simulator host", () => {
       const [catalogDevice] = (yield* ready.devices.list).devices;
       yield* ready.devices.boot(catalogDevice!).pipe(Effect.flip);
       expect(expo.stopped()).toEqual(["orphan"]);
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+
+  it.effect("counts a create whose outcome is unknown against the limit, then frees it", () =>
+    Effect.gen(function* () {
+      // Create fails and the session is not listed yet, so the outcome is unknown.
+      const expo = fakeExpo({ failCreate: true, omitCreatedFromActive: true });
+      const host = yield* makeHost(expo, config({ maxConcurrentSessions: 1 }), yield* Scope.make());
+      const ready = yield* host.ensureReady(() => Effect.void);
+      const [catalogDevice] = (yield* ready.devices.list).devices;
+      yield* ready.devices.boot(catalogDevice!).pipe(Effect.flip);
+      // The slot is held: Expo may have made the session.
+      const refused = yield* ready.devices.boot(catalogDevice!).pipe(Effect.flip);
+      expect(refused.message).toContain("still being cleaned up");
+      expect(expo.named("T3CreateEasSimulatorSession")).toHaveLength(1);
+      // After Expo would have listed it, the slot frees and a new start runs.
+      yield* TestClock.adjust("6 minutes");
+      yield* ready.devices.list;
+      expo.allowCreate();
+      expect(yield* ready.devices.boot(catalogDevice!)).toBe("session-1");
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+
+  it.effect("holds the slot when a failed create’s session is listed but its stop fails", () =>
+    Effect.gen(function* () {
+      let stopFails = true;
+      // Create fails, Expo lists the session by name, and stopping it fails too.
+      const expo = fakeExpo({ failCreate: true, failStop: () => stopFails });
+      const host = yield* makeHost(expo, config({ maxConcurrentSessions: 1 }), yield* Scope.make());
+      const ready = yield* host.ensureReady(() => Effect.void);
+      const [catalogDevice] = (yield* ready.devices.list).devices;
+      yield* ready.devices.boot(catalogDevice!).pipe(Effect.flip);
+      const refused = yield* ready.devices.boot(catalogDevice!).pipe(Effect.flip);
+      expect(refused.message).toContain("still being cleaned up");
+      stopFails = false;
+      yield* ready.devices.list;
+      expect(expo.stopped()).toContain("orphan");
+      expo.allowCreate();
+      expect(yield* ready.devices.boot(catalogDevice!)).toBe("session-1");
     }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 });
