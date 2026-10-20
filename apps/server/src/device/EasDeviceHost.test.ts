@@ -617,6 +617,13 @@ describe("EAS Simulator host", () => {
       const [device] = (yield* ready.devices.list).devices;
       status = "IN_PROGRESS";
       expect(yield* ready.devices.boot(device!)).toBe("session-2");
+      // The old write landed first, so the replacement's record is intact.
+      const path = yield* Path.Path;
+      const server = yield* ServerConfig.ServerConfig;
+      const entries = JSON.parse(
+        yield* fs.readFileString(path.join(server.stateDir, "device", "eas", "eas.json")),
+      ) as Array<{ name: string }>;
+      expect(entries).toHaveLength(1);
     }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 
