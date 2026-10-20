@@ -391,11 +391,13 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
     startedIn: number,
   ) {
     const name = `T3 Code · ${config.label} · ${(yield* Random.nextIntBetween(0, 0xffffff)).toString(16).padStart(6, "0")}`;
+    // The credential comes first: without one, the answer is how to sign in,
+    // not that the limit is reached.
+    const expo = yield* api;
     return yield* Effect.acquireUseRelease(
       reserveSlot(name),
       () =>
         Effect.gen(function* () {
-          const expo = yield* api;
           const appId =
             config.appId ??
             Option.getOrUndefined(
@@ -545,7 +547,15 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
     if (stale.length === 0 && unresolved.size === 0 && uncertain.size === 0 && !reapDue) return;
     const reap = reapDue || uncertain.size > 0;
     if (reap) reapedAt = now;
-    const expo = yield* api;
+    const expo = yield* api.pipe(
+      // Without a credential no sweep can look; a record Expo would have
+      // listed by now still stops counting, so the limit is not held forever.
+      Effect.tapError(() =>
+        Effect.sync(() => {
+          for (const [name, { until }] of uncertain) if (now >= until) uncertain.delete(name);
+        }),
+      ),
+    );
     yield* Effect.forEach(
       [...unresolved],
       ([name, { sessionId }]) => retryUnresolved(expo, name, sessionId),
