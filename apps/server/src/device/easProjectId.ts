@@ -13,8 +13,9 @@ const CONFIG_FILES = [
 ];
 const JSON_CONFIG_FILES = ["app.config.json", "app.json"];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const LITERAL_PROJECT_ID =
-  /projectId["']?\s*:\s*["'`]([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["'`]/gi;
+// A quoted `projectId`. An EAS project id is a UUID; another service's
+// (Firebase's, say) is not, and names no EAS project.
+const QUOTED_PROJECT_ID = /projectId["']?\s*:\s*["'`]([^"'`\n]*)["'`]/gi;
 const PROJECT_ID_MENTION = /\bprojectId\b/gi;
 
 const decodeAppJson = Schema.decodeUnknownOption(
@@ -37,14 +38,15 @@ const decodeAppJson = Schema.decodeUnknownOption(
  * The project ids a directory's app config names. Read, never run: a dynamic
  * config is the project's own code, which an agent may have written. Its text
  * is taken as it is, comments included, so an old id left in a comment makes
- * the answer ambiguous rather than wrong. app.config.json and app.json count
- * only when the dynamic config never mentions a project id, since it may
- * replace theirs. Null when the project is unknown: the config sets or
- * changes it some other way than a literal, or a config cannot be read.
+ * the answer ambiguous rather than wrong. app.config.json or app.json count
+ * too: a dynamic config may only replace theirs on some builds. Null when
+ * the project is unknown: the config sets or changes it some other way than
+ * a literal, or a config cannot be read.
  */
 const projectIdsOf = Effect.fn("easProjectId.projectIdsOf")(function* (dir: string) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const ids: Array<string> = [];
   const configFile = yield* Effect.findFirst(CONFIG_FILES, (file) =>
     fs.exists(path.join(dir, file)).pipe(Effect.orElseSucceed(() => false)),
   );
@@ -52,16 +54,13 @@ const projectIdsOf = Effect.fn("easProjectId.projectIdsOf")(function* (dir: stri
     const source = yield* fs
       .readFileString(path.join(dir, configFile.value))
       .pipe(Effect.orElseSucceed(() => "projectId"));
+    // Every mention of `projectId` must be a quoted entry: one set from a
+    // variable, or assigned later, could be any project, and makes the
+    // answer unknown.
     const mentions = source.match(PROJECT_ID_MENTION)?.length ?? 0;
-    if (mentions > 0) {
-      // Every mention of `projectId` must be a literal entry: one set from a
-      // variable, or assigned later, could be any project, and makes the
-      // answer unknown.
-      const literals = [...source.matchAll(LITERAL_PROJECT_ID)].map((match) =>
-        match[1]!.toLowerCase(),
-      );
-      return literals.length > 0 && literals.length === mentions ? literals : null;
-    }
+    const quoted = [...source.matchAll(QUOTED_PROJECT_ID)].map((match) => match[1]!);
+    if (quoted.length !== mentions) return null;
+    ids.push(...quoted.filter((id) => UUID.test(id)).map((id) => id.toLowerCase()));
   }
   for (const file of JSON_CONFIG_FILES) {
     const json = yield* fs.readFileString(path.join(dir, file)).pipe(
@@ -76,9 +75,12 @@ const projectIdsOf = Effect.fn("easProjectId.projectIdsOf")(function* (dir: stri
       Option.flatMap((value) => Option.fromNullishOr(value.expo?.extra?.eas?.projectId)),
       Option.filter((id) => UUID.test(id)),
     );
-    if (Option.isSome(id)) return [id.value.toLowerCase()];
+    if (Option.isSome(id)) {
+      ids.push(id.value.toLowerCase());
+      break;
+    }
   }
-  return [];
+  return ids;
 });
 
 /**

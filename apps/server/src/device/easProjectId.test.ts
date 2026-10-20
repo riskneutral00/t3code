@@ -62,12 +62,23 @@ it.effect.each([
     files: {
       "app.config.js": `export default {
         assetBundlePatterns: ["**/*"],
-        extra: { eas: { projectId: "${ID_A}" } },
+        extra: { eas: { projectId: "${ID_A}" }, firebase: { projectId: "my-app-12345" } },
       };
       /** docs */`,
-      "app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_B } } } }),
+      "app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_A } } } }),
     },
     expected: Option.some(ID_A),
+  },
+  {
+    case: "gives no answer when a config names a project only some builds use",
+    files: {
+      "app.config.ts": `export default ({ config }) =>
+        process.env.APP_VARIANT === "preview"
+          ? { ...config, extra: { ...config.extra, eas: { projectId: "${ID_B}" } } }
+          : config;`,
+      "app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_A } } } }),
+    },
+    expected: Option.none(),
   },
   {
     case: "gives no answer when a comment keeps an old project id",

@@ -171,13 +171,27 @@ describe("Expo API", () => {
       expect(serverError.message).toBe(
         "Expo could not stop a simulator session: Internal server error",
       );
+      const internalError = yield* makeExpoApi(
+        respond(
+          Response.json({
+            errors: [
+              { message: "Something went wrong", extensions: { code: "INTERNAL_SERVER_ERROR" } },
+            ],
+          }),
+        ),
+        credential,
+      )
+        .stop("session-1")
+        .pipe(Effect.flip);
       // Expo answered and refused the first two: nothing was done. GraphQL
-      // errors at a server error may come from a request that ran.
-      expect([graphQl.rejected, rejected.rejected, serverError.rejected]).toEqual([
-        true,
-        true,
-        false,
-      ]);
+      // errors at a server error, or an internal error, may come from a
+      // request that ran.
+      expect([
+        graphQl.rejected,
+        rejected.rejected,
+        serverError.rejected,
+        internalError.rejected,
+      ]).toEqual([true, true, false, false]);
     }),
   );
 });
