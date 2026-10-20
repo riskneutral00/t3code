@@ -36,7 +36,10 @@ const fixture = (
         finalized++;
       });
       if (fail) return yield* Effect.die(new Error("upstream failed"));
-      return HttpClientResponse.fromWeb(request, new Response("frame"));
+      return HttpClientResponse.fromWeb(
+        request,
+        new Response("frame", { headers: { "set-cookie": "upstream=1" } }),
+      );
     }),
   );
   const { handler, dispose } = HttpRouter.toWebHandler(
@@ -195,6 +198,7 @@ describe("device hub proxy", () => {
       }),
     );
     expect(routed.status).toBe(200);
+    expect(routed.headers.get("set-cookie")).toBeNull();
     await routed.text();
     expect(requests).toEqual(["https://session.test/api?device=udid-1"]);
     expect(headers[0]?.authorization).toBe("Bearer session-token");

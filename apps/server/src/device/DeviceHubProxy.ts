@@ -137,7 +137,13 @@ const proxyHttp = Effect.fn("DeviceHubProxy.proxyHttp")(function* (
   const response = yield* httpClient.execute(upstreamRequest);
   const headers: Record<string, string> = {};
   for (const [name, value] of Object.entries(response.headers)) {
-    if (name === "content-encoding" || name === "transfer-encoding" || name === "connection") {
+    // A cookie from an upstream such as an EAS session's preview host would land on T3's origin.
+    if (
+      name === "content-encoding" ||
+      name === "transfer-encoding" ||
+      name === "connection" ||
+      name === "set-cookie"
+    ) {
       continue;
     }
     if (value !== undefined) headers[name] = value;
