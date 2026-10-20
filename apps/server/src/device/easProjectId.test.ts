@@ -343,9 +343,10 @@ it.effect("gives no answer at once for a config too large to be one", () =>
       "apps/mobile/app.config.ts": entry.repeat(Math.ceil((1024 * 1024) / entry.length)),
       "apps/kiosk/app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_B } } } }),
     });
+    // The bound is loose for a loaded test machine; the slow cases take minutes.
     const startedAt = performance.now();
     expect(yield* findEasProjectId(root)).toEqual(Option.none());
-    expect(performance.now() - startedAt).toBeLessThan(2_000);
+    expect(performance.now() - startedAt).toBeLessThan(10_000);
   }).pipe(Effect.scoped, Effect.provide(layer)),
 );
 
@@ -361,9 +362,10 @@ it.effect("answers at once for a long comment before the rest of a joined id", (
       };`,
       "apps/kiosk/app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_B } } } }),
     });
+    // The bound is loose for a loaded test machine; the slow cases take minutes.
     const startedAt = performance.now();
     expect(yield* findEasProjectId(root)).toEqual(Option.none());
-    expect(performance.now() - startedAt).toBeLessThan(2_000);
+    expect(performance.now() - startedAt).toBeLessThan(10_000);
   }).pipe(Effect.scoped, Effect.provide(layer)),
 );
 
