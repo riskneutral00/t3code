@@ -46,7 +46,14 @@ export const EasDeviceHostConfig = Schema.Struct({
   maxConcurrentSessions: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 20 })).pipe(
     Schema.withDecodingDefaultKey(Effect.succeed(2)),
   ),
-});
+}).check(
+  // EAS requires the idle limit to be smaller than the session limit.
+  Schema.makeFilter(
+    (host: { readonly idleMinutes: number; readonly maxSessionMinutes: number }) =>
+      host.idleMinutes < host.maxSessionMinutes ||
+      "Idle minutes must be smaller than session minutes.",
+  ),
+);
 export type EasDeviceHostConfig = typeof EasDeviceHostConfig.Type;
 
 export type DeviceHostConfig = SshDeviceHostConfig | EasDeviceHostConfig;

@@ -57,6 +57,10 @@ describe("configured device hosts", () => {
     expect(() =>
       decodeEas([{ kind: "eas", id: "eas", label: "EAS", maxSessionMinutes: 600 }]),
     ).toThrow();
+    // The default idle limit of 10 is not smaller than a session limit of 10.
+    expect(() =>
+      decodeEas([{ kind: "eas", id: "eas", label: "EAS", maxSessionMinutes: 10 }]),
+    ).toThrow();
   });
 });
 
