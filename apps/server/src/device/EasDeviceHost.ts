@@ -12,9 +12,11 @@ import {
   type DevicePlatform,
   type EasDeviceHostConfig,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FiberSet from "effect/FiberSet";
 import * as FileSystem from "effect/FileSystem";
@@ -117,6 +119,8 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
   // while a session boots leaves it running and tracked, and stopping or
   // closing the host interrupts the start, which then stops its session.
   const starts = yield* FiberSet.make<string, unknown>();
+  // The startup sweep for recorded leftovers.
+  const background = yield* FiberSet.make<void, never>();
   // Sessions this host owns that `sessions` does not hold: starts in progress,
   // and sessions whose stop after a failed start failed too. The reaper leaves
   // them alone and they count against the limit.
@@ -213,7 +217,15 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
                   if (running.length > 0) {
                     return yield* Effect.forEach(
                       running,
-                      (session) => stopSession(expo, session.id, entry.name),
+                      (session) =>
+                        stopSession(expo, session.id, entry.name).pipe(
+                          // Still running and billed: owned, counted, and retried by listing.
+                          Effect.catch(() =>
+                            Effect.sync(
+                              () => void unresolved.set(entry.name, { sessionId: session.id }),
+                            ),
+                          ),
+                        ),
                       { discard: true },
                     );
                   }
@@ -299,9 +311,12 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
     startLock.withPermit(
       Effect.suspend(() => {
         if (sessions.size + starting.size + unresolved.size >= config.maxConcurrentSessions) {
+          const limit = `${config.label} is limited to ${config.maxConcurrentSessions} running ${config.maxConcurrentSessions === 1 ? "session" : "sessions"}.`;
           return Effect.fail(
             unavailable(
-              `${config.label} is limited to ${config.maxConcurrentSessions} running ${config.maxConcurrentSessions === 1 ? "session" : "sessions"}. Close one in the Device panel first.`,
+              unresolved.size > 0
+                ? `${limit} Stopping ${unresolved.size === 1 ? "a session" : `${unresolved.size} sessions`} failed and is being retried; try again shortly.`
+                : `${limit} Close one in the Device panel first.`,
             ),
           );
         }
@@ -447,6 +462,7 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
     );
     const reapDue = now - reapedAt > REAP_INTERVAL_MS;
     if (stale.length === 0 && unresolved.size === 0 && !reapDue) return;
+    if (reapDue) reapedAt = now;
     const expo = yield* api;
     yield* Effect.forEach(
       [...unresolved],
@@ -513,7 +529,12 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
       const startedIn = epoch;
       return startSession(device, context, startedIn).pipe(
         FiberSet.run(starts),
-        Effect.flatMap(Fiber.join),
+        Effect.flatMap(Fiber.await),
+        Effect.flatMap((exit) =>
+          Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)
+            ? Effect.fail(unavailable(`${config.label} was stopped while the session started.`))
+            : exit,
+        ),
       );
     },
     attach: () => Effect.void,
@@ -615,8 +636,7 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
       if (ready) return ready;
       // Without a credential the host is still ready: opening a device then
       // says how to sign in, and listing reaps once one is there.
-      const expo = yield* Effect.option(api);
-      if (Option.isSome(expo)) yield* reapLeftovers(expo.value);
+      yield* FiberSet.run(background)(api.pipe(Effect.flatMap(reapLeftovers), Effect.ignore));
       ready = {
         nodePath,
         hub: { origin: "https://api.expo.dev" },
@@ -640,7 +660,7 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
     epoch++;
     // Interrupted starts stop the sessions they created before this returns.
     yield* FiberSet.clear(starts);
-    if (sessions.size === 0 && unresolved.size === 0) return;
+    yield* FiberSet.clear(background);
     const expo = yield* api;
     yield* Effect.forEach(
       [...sessions.values()],
@@ -656,6 +676,8 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
         ),
       { discard: true, concurrency: 4 },
     );
+    // Also stop a recorded session a create that timed out made after all.
+    yield* reapLeftovers(expo);
   }).pipe(Effect.ignore);
   yield* Effect.addFinalizer(() => stopAll);
 

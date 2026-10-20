@@ -308,10 +308,20 @@ describe("EAS Simulator host", () => {
       });
       const host = yield* makeHost(expo, config(), yield* Scope.make());
       yield* host.ensureReady(() => Effect.void);
+      // The sweep runs in the background, so readiness does not wait on Expo.
+      const ledgerNames = Effect.map(
+        Effect.flatMap(fs.readFileString(ledger), (text) =>
+          Effect.try(() => JSON.parse(text) as ReadonlyArray<{ name: string }>),
+        ),
+        (entries) => entries.map((entry) => entry.name),
+      );
+      yield* Effect.eventually(
+        Effect.flatMap(ledgerNames, (names) =>
+          names.length === 1 ? Effect.void : Effect.fail("not swept yet"),
+        ),
+      );
       expect(expo.stopped()).toEqual(["left-behind"]);
-      expect(
-        JSON.parse(yield* fs.readFileString(ledger)).map((entry: { name: string }) => entry.name),
-      ).toEqual(["T3 Code · EAS Simulator · new"]);
+      expect(yield* ledgerNames).toEqual(["T3 Code · EAS Simulator · new"]);
     }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 
@@ -420,7 +430,8 @@ describe("EAS Simulator host", () => {
       // Never released: stopping must not wait for the session to become ready.
       yield* host.stop;
       expect(expo.stopped()).toEqual(["session-1"]);
-      expect(Exit.isFailure(yield* Fiber.await(booting))).toBe(true);
+      const failure = yield* Fiber.join(booting).pipe(Effect.flip);
+      expect(failure.message).toContain("was stopped while the session started");
       expect((yield* ready.devices.list).devices.map((device) => device.id)).toEqual(["eas-ios"]);
     }).pipe(Effect.scoped, Effect.provide(layer)),
   );
@@ -460,7 +471,7 @@ describe("EAS Simulator host", () => {
       while (failing.pollUnsafe() === undefined) yield* TestClock.adjust("1 second");
       yield* Fiber.join(failing);
       const refused = yield* ready.devices.boot(catalogDevice!).pipe(Effect.flip);
-      expect(refused.message).toContain("limited to 1 running session");
+      expect(refused.message).toContain("failed and is being retried");
       expect(expo.named("T3CreateEasSimulatorSession")).toHaveLength(1);
       stopFails = false;
       yield* ready.devices.list;
