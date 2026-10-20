@@ -50,16 +50,9 @@ const decodeIdTokenClaims = Schema.decodeUnknownOption(Schema.fromJsonString(IdT
 /**
  * Who an install belongs to, from strongest to weakest. `connect` is the T3
  * Connect account. `openai` and `claude` are provider accounts. `device` is a
- * client device that connected. `legacy` is the provider hash that events used
- * as `distinct_id` before each install had its own, so old events can be joined.
+ * client device that connected.
  */
-export const TelemetryOwnerSource = Schema.Literals([
-  "connect",
-  "openai",
-  "claude",
-  "device",
-  "legacy",
-]);
+export const TelemetryOwnerSource = Schema.Literals(["connect", "openai", "claude", "device"]);
 export type TelemetryOwnerSource = typeof TelemetryOwnerSource.Type;
 
 export interface TelemetryOwner {
@@ -257,38 +250,10 @@ const upsertAnonymousId = Effect.gen(function* () {
   return anonymousId;
 });
 
-/**
- * The hash of this install's anonymous id, which never changes for the install.
- * It is the `distinct_id` of every event. Null turns telemetry off when the id
- * cannot be read or saved.
- */
-export const getInstallIdentifier = upsertAnonymousId.pipe(
-  Effect.map(hashTelemetryId),
-  Effect.catch((error) => logTelemetryIdentityError(error).pipe(Effect.as(null))),
-);
-
-/**
- * Owners the server can read without a client: the linked T3 Connect account
- * and the provider logins under `homeDirectory`. Clients add `connect` and
- * `device` owners when they connect.
- *
- * A missing file falls through quietly, and so does an API-key-only Codex
- * auth.json. Only unreadable or malformed files warn.
- */
-export const getServerOwnersForHome = Effect.fn("getServerOwnersForHome")(function* (
+const readProviderLogins = Effect.fn("TelemetryIdentity.readProviderLogins")(function* (
   homeDirectory: string,
 ) {
   const path = yield* Path.Path;
-  const secrets = yield* ServerSecretStore.ServerSecretStore;
-
-  const connectUser = yield* secrets.get(CLOUD_LINKED_USER_ID).pipe(
-    Effect.map(Option.map((bytes) => new TextDecoder().decode(bytes))),
-    Effect.catch((cause) =>
-      Effect.logWarning("Failed to read the linked T3 Connect account for telemetry", {
-        errorTag: cause._tag,
-      }).pipe(Effect.as(Option.none<string>())),
-    ),
-  );
   const codexTokens = yield* readJsonIdentityFile(
     "codex",
     path.join(homeDirectory, ".codex", "auth.json"),
@@ -302,6 +267,61 @@ export const getServerOwnersForHome = Effect.fn("getServerOwnersForHome")(functi
     path.join(homeDirectory, ".claude.json"),
     decodeClaudeJson,
   ).pipe(skipOnError);
+  return { codexTokens, claudeJson };
+});
+
+/**
+ * `distinctId` keeps the rule every earlier build used, so analytics stay
+ * continuous: the hashed Codex `account_id`, else the Claude machine `userID`,
+ * else the install's anonymous id. It can change when someone logs in, and a
+ * Codex Team shares one. `installId` is the hashed anonymous id, which never
+ * changes for an install; count installs and people with it.
+ *
+ * A null `distinctId` turns telemetry off. A missing file falls through quietly,
+ * and so does an API-key-only Codex auth.json. Only unreadable or malformed
+ * files warn.
+ */
+export const getTelemetryIdentityForHome = Effect.fn("getTelemetryIdentityForHome")(function* (
+  homeDirectory: string,
+) {
+  const { codexTokens, claudeJson } = yield* readProviderLogins(homeDirectory);
+  const installId = yield* upsertAnonymousId.pipe(
+    Effect.map(hashTelemetryId),
+    Effect.catch((error) => logTelemetryIdentityError(error).pipe(Effect.as(null))),
+  );
+  const providerId = Option.orElse(
+    Option.map(codexTokens, (tokens) => tokens.account_id),
+    () => Option.flatMap(claudeJson, (json) => Option.fromUndefinedOr(json.userID)),
+  );
+  return {
+    distinctId: Option.isSome(providerId) ? hashTelemetryId(providerId.value) : installId,
+    installId,
+  };
+});
+
+export const getTelemetryIdentity = Effect.flatMap(
+  HostProcess.HomeDirectory,
+  getTelemetryIdentityForHome,
+);
+
+/**
+ * Owners the server can read without a client: the linked T3 Connect account
+ * and the provider logins under `homeDirectory`. Clients add `connect` and
+ * `device` owners when they connect.
+ */
+export const getServerOwnersForHome = Effect.fn("getServerOwnersForHome")(function* (
+  homeDirectory: string,
+) {
+  const secrets = yield* ServerSecretStore.ServerSecretStore;
+  const connectUser = yield* secrets.get(CLOUD_LINKED_USER_ID).pipe(
+    Effect.map(Option.map((bytes) => new TextDecoder().decode(bytes))),
+    Effect.catch((cause) =>
+      Effect.logWarning("Failed to read the linked T3 Connect account for telemetry", {
+        errorTag: cause._tag,
+      }).pipe(Effect.as(Option.none<string>())),
+    ),
+  );
+  const { codexTokens, claudeJson } = yield* readProviderLogins(homeDirectory);
 
   const raw: ReadonlyArray<readonly [TelemetryOwnerSource, Option.Option<string>]> = [
     ["connect", connectUser],
@@ -314,13 +334,6 @@ export const getServerOwnersForHome = Effect.fn("getServerOwnersForHome")(functi
     [
       "claude",
       Option.flatMap(claudeJson, (json) => Option.fromUndefinedOr(json.oauthAccount?.accountUuid)),
-    ],
-    [
-      "legacy",
-      Option.orElse(
-        Option.map(codexTokens, (tokens) => tokens.account_id),
-        () => Option.flatMap(claudeJson, (json) => Option.fromUndefinedOr(json.userID)),
-      ),
     ],
   ];
   return raw.flatMap(([source, value]): ReadonlyArray<TelemetryOwner> =>

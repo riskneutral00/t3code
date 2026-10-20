@@ -70,7 +70,7 @@ const writeHomeFile = Effect.fn("test.writeHomeFile")(function* (
 });
 
 it.layer(NodeServices.layer)("telemetry identity", (it) => {
-  it.effect("keeps the install id when provider logins appear", () =>
+  it.effect("keeps the old distinct_id rule and a fixed install id as logins change", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
       const fileSystem = yield* FileSystem.FileSystem;
@@ -78,20 +78,46 @@ it.layer(NodeServices.layer)("telemetry identity", (it) => {
       const homeDirectory = path.join(config.baseDir, "home");
       const anonymousId = "persisted-anonymous-id";
       yield* fileSystem.writeFileString(config.anonymousIdPath, anonymousId);
+      const installId = yield* sha256(anonymousId);
+      const identity = () => Identify.getTelemetryIdentityForHome(homeDirectory);
 
-      const before = yield* Identify.getInstallIdentifier;
+      assert.deepEqual(yield* identity(), { distinctId: installId, installId });
+
+      yield* writeHomeFile(homeDirectory, ".claude.json", `{"userID":"claude-machine"}`);
+      assert.deepEqual(yield* identity(), {
+        distinctId: yield* sha256("claude-machine"),
+        installId,
+      });
+
+      yield* writeHomeFile(homeDirectory, ".codex/auth.json", `{"auth_mode":"apikey"}`);
+      assert.equal((yield* identity()).distinctId, yield* sha256("claude-machine"));
+
       yield* writeHomeFile(homeDirectory, ".codex/auth.json", `{"tokens":{"account_id":"ws-1"}}`);
-      yield* writeHomeFile(homeDirectory, ".claude.json", `{"userID":"machine-1"}`);
-
-      assert.equal(before, yield* sha256(anonymousId));
-      assert.equal(yield* Identify.getInstallIdentifier, before);
+      assert.deepEqual(yield* identity(), { distinctId: yield* sha256("ws-1"), installId });
     }).pipe(Effect.provide(layerIdentity("t3-telemetry-identify-install-"))),
+  );
+
+  it.effect("keeps a provider distinct_id when the install id cannot be saved", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const homeDirectory = path.join(config.baseDir, "home");
+      yield* fileSystem.makeDirectory(config.anonymousIdPath);
+      yield* writeHomeFile(homeDirectory, ".claude.json", `{"userID":"claude-machine"}`);
+
+      assert.deepEqual(yield* Identify.getTelemetryIdentityForHome(homeDirectory), {
+        distinctId: yield* sha256("claude-machine"),
+        installId: null,
+      });
+    }).pipe(Effect.provide(layerIdentity("t3-telemetry-identify-noinstall-"))),
   );
 
   it.effect("leaves no torn anonymous id behind when its write fails midway", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
       const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
       const tornWrites = FileSystem.FileSystem.of({
         ...fileSystem,
         writeFileString: (filePath, data, options) =>
@@ -111,11 +137,11 @@ it.layer(NodeServices.layer)("telemetry identity", (it) => {
             ),
       });
 
-      const identifier = yield* Identify.getInstallIdentifier.pipe(
-        Effect.provideService(FileSystem.FileSystem, tornWrites),
-      );
+      const identity = yield* Identify.getTelemetryIdentityForHome(
+        path.join(config.baseDir, "home"),
+      ).pipe(Effect.provideService(FileSystem.FileSystem, tornWrites));
 
-      assert.isNull(identifier);
+      assert.deepEqual(identity, { distinctId: null, installId: null });
       assert.isFalse(yield* fileSystem.exists(config.anonymousIdPath));
     }).pipe(Effect.provide(layerIdentity("t3-telemetry-identify-torn-"))),
   );
@@ -126,9 +152,13 @@ it.layer(NodeServices.layer)("telemetry identity", (it) => {
     return Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;
       const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
       yield* fileSystem.makeDirectory(config.anonymousIdPath);
 
-      assert.isNull(yield* Identify.getInstallIdentifier);
+      const identity = yield* Identify.getTelemetryIdentityForHome(
+        path.join(config.baseDir, "home"),
+      );
+      assert.deepEqual(identity, { distinctId: null, installId: null });
       assert.deepEqual(yield* fileSystem.readDirectory(config.anonymousIdPath), []);
 
       const readLog = findIdentityLog(logs, "anonymous", "TelemetryIdentityReadError");
@@ -176,25 +206,8 @@ it.layer(NodeServices.layer)("telemetry identity", (it) => {
         { source: "connect", ownerId: yield* sha256("user_connect") },
         { source: "openai", ownerId: yield* sha256("user-openai-person") },
         { source: "claude", ownerId: yield* sha256("claude-person") },
-        { source: "legacy", ownerId: yield* sha256("team-workspace") },
       ]);
     }).pipe(Effect.provide(layerIdentity("t3-telemetry-identify-owners-"))),
-  );
-
-  it.effect("uses the Claude machine id as the legacy owner when Codex has no ChatGPT login", () =>
-    Effect.gen(function* () {
-      const config = yield* ServerConfig.ServerConfig;
-      const path = yield* Path.Path;
-      const homeDirectory = path.join(config.baseDir, "home");
-      assert.deepEqual(yield* Identify.getServerOwnersForHome(homeDirectory), []);
-
-      yield* writeHomeFile(homeDirectory, ".codex/auth.json", `{"auth_mode":"apikey"}`);
-      yield* writeHomeFile(homeDirectory, ".claude.json", `{"userID":"claude-machine"}`);
-
-      assert.deepEqual(yield* Identify.getServerOwnersForHome(homeDirectory), [
-        { source: "legacy", ownerId: yield* sha256("claude-machine") },
-      ]);
-    }).pipe(Effect.provide(layerIdentity("t3-telemetry-identify-legacy-"))),
   );
 
   it.effect.each([

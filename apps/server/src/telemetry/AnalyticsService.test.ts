@@ -16,7 +16,7 @@ import * as HttpServerResponse from "effect/http/HttpServerResponse";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as ServerConfig from "../config.ts";
-import { getInstallIdentifier } from "./Identify.ts";
+import { getTelemetryIdentity } from "./Identify.ts";
 import * as AnalyticsService from "./AnalyticsService.ts";
 
 interface RecordedBatchRequest {
@@ -61,6 +61,7 @@ const SentBatch = Schema.fromJsonString(
         distinct_id: Schema.String,
         properties: Schema.Struct({
           telemetryChannel: Schema.String,
+          installId: Schema.optionalKey(Schema.String),
           ownerSource: Schema.optionalKey(Schema.String),
           observedBy: Schema.optionalKey(Schema.String),
         }),
@@ -104,7 +105,7 @@ const sendForTenMinutes = (
   record: Effect.Effect<
     void,
     never,
-    AnalyticsService.AnalyticsService | Effect.Services<typeof getInstallIdentifier>
+    AnalyticsService.AnalyticsService | Effect.Services<typeof getTelemetryIdentity>
   > = recordTwentyEvents,
 ) =>
   Effect.gen(function* () {
@@ -199,13 +200,13 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
     }).pipe(Effect.ensuring(Effect.sync(() => vi.unstubAllGlobals()))),
   );
 
-  it.effect("each owner is sent once per process, on events keyed by the install id", () =>
+  it.effect("each owner is sent once per process, and every event carries the install id", () =>
     Effect.gen(function* () {
-      let installId: string | null = null;
+      let identity: Effect.Success<typeof getTelemetryIdentity> | null = null;
       const batches = yield* sendForTenMinutes(
         respondWithStatus(204),
         Effect.gen(function* () {
-          installId = yield* getInstallIdentifier;
+          identity = yield* getTelemetryIdentity;
           const analytics = yield* AnalyticsService.AnalyticsService;
           const connect = { source: "connect", ownerId: "a".repeat(64) } as const;
           yield* analytics.recordOwner({ ...connect, observedBy: "server" });
@@ -232,8 +233,13 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
           ["install.owner_observed", "device", "client"],
         ],
       );
+      const { distinctId, installId } = identity!;
       assert.isString(installId);
-      assert.isTrue(events.every((event) => event.distinct_id === installId));
+      assert.isTrue(
+        events.every(
+          (event) => event.distinct_id === distinctId && event.properties.installId === installId,
+        ),
+      );
     }),
   );
 
@@ -283,8 +289,8 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
 
       yield* Effect.gen(function* () {
         yield* Layer.launch(layerBatchServer).pipe(Effect.forkScoped);
-        const telemetryIdentifier = yield* getInstallIdentifier;
-        assert.equal(telemetryIdentifier !== null, true);
+        const { distinctId } = yield* getTelemetryIdentity;
+        assert.equal(distinctId !== null, true);
         const analytics = yield* AnalyticsService.AnalyticsService;
 
         for (let index = 0; index < 45; index += 1) {

@@ -7,13 +7,16 @@ count as product use.
 
 ## Installs and owners
 
-Every event's `distinct_id` is the install: the hash of a random id saved in the
-server's state directory. It never changes when someone signs in, signs out, or
-links T3 Connect, so one install is always one id. Who the install belongs to is a
-separate fact, sent as `install.owner_observed`. Owners are resolved at query time
-in our own store, so a rule can change and apply to all history. Do not move the
-owner into `distinct_id`: PostHog merges cannot be undone, and an owner that
-changes mid-life would split the install.
+`distinct_id` keeps the rule every build has used: the hashed Codex workspace,
+else the Claude machine id, else the install's anonymous id. It can change when
+someone logs in, and a Codex Team shares one, but keeping it means PostHog charts
+and history never break. Do not change it; add a field instead.
+
+Every event also carries `installId`: the hash of a random id saved in the
+server's state directory, which never changes for the install. Count installs
+with it. Who an install belongs to is a separate fact, sent as
+`install.owner_observed`. Owners are resolved at query time in our own store, so
+a rule can change and apply to all history.
 
 [Owner sources](../../apps/server/src/telemetry/Identify.ts), strongest first:
 T3 Connect, then the OpenAI and Claude person ids, then the client device. The
@@ -22,8 +25,7 @@ logins. A connecting client reports its signed-in Connect account and its device
 which links every environment opened from one phone, browser, or desktop. Use the
 OpenAI `user_id` claim, not the Codex `account_id` (the ChatGPT workspace, which a
 whole Team shares) or the token `sub` (one per login method). Two Connect accounts are never the same person, whatever
-weaker ids they share. `legacy` carries the old provider-hash `distinct_id` so
-earlier events can join their install's owner.
+weaker ids they share.
 
 Every id is SHA-256 hashed with [one helper](../../packages/shared/src/telemetryId.ts)
 on both sides, so a Connect account hashes the same on the client and the server.
