@@ -315,9 +315,30 @@ it.effect.each([
     expected: Option.none(),
   },
   {
-    case: "gives no answer when a dynamic config spreads nothing, since Expo then ignores app.json",
+    case: "gives no answer when a dynamic config spreads nothing, which may or may not use app.json",
     files: {
       "app.config.js": `export default { name: "Mobile", slug: "mobile" };`,
+      "app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_A } } } }),
+    },
+    expected: Option.none(),
+  },
+  {
+    case: "does not let a sibling win over an app whose config returns app.json's config changed",
+    files: {
+      "apps/mobile/app.config.js": `module.exports = ({ config }) => {
+        config.name = "Mobile";
+        return config;
+      };`,
+      "apps/mobile/app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_A } } } }),
+      "apps/kiosk/app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_B } } } }),
+    },
+    expected: Option.none(),
+  },
+  {
+    case: "gives no answer when a spread of an identifier starting with config may replace app.json's id",
+    files: {
+      "app.config.js": `const config$ = require("./app.local.js");
+        module.exports = ({ config }) => ({ ...config, ...config$ });`,
       "app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_A } } } }),
     },
     expected: Option.none(),

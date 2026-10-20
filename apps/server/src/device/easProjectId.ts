@@ -39,22 +39,25 @@ const SPREAD_LATER = /\.\.\./;
 // Space, a comment, or an opening parenthesis: what may sit between `...`
 // and the thing spread. Sticky, so the scan moves through the file once.
 const SPREAD_FILLER = /(?:\s+|\/\/[^\n\r\u2028\u2029]*|\/\*(?:[^*]|\*(?!\/))*\*\/|\()/y;
-const CONFIG_AT = /config\b/y;
+// `config` and no more of an identifier after it (`$` and Unicode letters
+// continue one, where `\b` would not).
+const CONFIG_AT = /config(?![\p{ID_Continue}$\u200c\u200d])/uy;
 
 /**
  * How a dynamic config with no EAS id of its own relates to app.json's:
  * `spreads` when every spread in it spreads `config`, the one Expo hands it
  * (app.json's entry carries through); `replaces` when it spreads anything
- * else, which may replace that entry; `ignores` when it spreads nothing,
- * since Expo then uses the dynamic config alone. A `...` inside a comment
- * after a spread is skipped with the comment, so the scan is linear.
+ * else, which may replace that entry; `unclear` when it spreads nothing,
+ * since it may return `config` changed, or a config of its own that Expo
+ * uses alone. A `...` inside a comment after a spread is skipped with the
+ * comment, so the scan is linear.
  */
-const staticConfigUse = (source: string): "spreads" | "replaces" | "ignores" => {
+const staticConfigUse = (source: string): "spreads" | "replaces" | "unclear" => {
   let spreads = 0;
   let at = 0;
   for (;;) {
     const next = source.indexOf("...", at);
-    if (next === -1) return spreads > 0 ? "spreads" : "ignores";
+    if (next === -1) return spreads > 0 ? "spreads" : "unclear";
     spreads++;
     at = next + 3;
     for (;;) {
@@ -120,12 +123,10 @@ const projectIdsOf = Effect.fn("easProjectId.projectIdsOf")(function* (dir: stri
     ) {
       return null;
     }
-    if (!quoted.some((id) => UUID.test(id))) {
-      const use = staticConfigUse(source);
-      if (use === "replaces") return null;
-      // Expo uses a dynamic config that spreads nothing on its own: app.json's
-      // entry names nothing for this app.
-      if (use === "ignores") return ids;
+    // Only a config shown to spread `config` and nothing else carries app.json's
+    // entry through unchanged; any other shape could use or replace it.
+    if (!quoted.some((id) => UUID.test(id)) && staticConfigUse(source) !== "spreads") {
+      return null;
     }
     ids.push(...quoted.filter((id) => UUID.test(id)).map((id) => id.toLowerCase()));
   }
