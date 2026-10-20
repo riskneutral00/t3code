@@ -138,6 +138,8 @@ describe("Expo API", () => {
       expect(error.message).toContain("Expo's API is unreachable");
       expect(JSON.stringify(error)).not.toContain("session-secret");
       expect(error.cause).toBeUndefined();
+      // No answer: a mutation may have run.
+      expect(error.rejected).toBe(false);
     }),
   );
 
@@ -160,6 +162,8 @@ describe("Expo API", () => {
       expect(rejected.message).toBe(
         "Expo could not stop a simulator session: the eas login session was rejected (HTTP 401)",
       );
+      // Expo answered and refused both: nothing was done.
+      expect([graphQl.rejected, rejected.rejected]).toEqual([true, true]);
     }),
   );
 });

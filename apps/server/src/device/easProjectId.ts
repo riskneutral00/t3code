@@ -15,6 +15,7 @@ const JSON_CONFIG_FILES = ["app.config.json", "app.json"];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LITERAL_PROJECT_ID =
   /projectId["']?\s*:\s*["'`]([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})["'`]/gi;
+const PROJECT_ID_KEY = /projectId["']?\s*:/gi;
 
 const decodeAppJson = Schema.decodeUnknownOption(
   Schema.fromJsonString(
@@ -38,7 +39,8 @@ const decodeAppJson = Schema.decodeUnknownOption(
  * is taken as it is, comments included, so an old id left in a comment makes
  * the answer ambiguous rather than wrong. app.config.json and app.json count
  * only when the dynamic config never mentions a project id, since it may
- * replace theirs.
+ * replace theirs. Null when the project is unknown: the config sets it some
+ * other way than a literal, or cannot be read.
  */
 const projectIdsOf = Effect.fn("easProjectId.projectIdsOf")(function* (dir: string) {
   const fs = yield* FileSystem.FileSystem;
@@ -51,7 +53,13 @@ const projectIdsOf = Effect.fn("easProjectId.projectIdsOf")(function* (dir: stri
       .readFileString(path.join(dir, configFile.value))
       .pipe(Effect.orElseSucceed(() => "projectId"));
     if (/projectId/i.test(source)) {
-      return [...source.matchAll(LITERAL_PROJECT_ID)].map((match) => match[1]!.toLowerCase());
+      // Every `projectId:` must be a literal: one set from a variable or an
+      // expression could be any project, and makes the answer unknown.
+      const literals = [...source.matchAll(LITERAL_PROJECT_ID)].map((match) =>
+        match[1]!.toLowerCase(),
+      );
+      const keys = source.match(PROJECT_ID_KEY)?.length ?? 0;
+      return literals.length > 0 && literals.length === keys ? literals : null;
     }
   }
   for (const file of JSON_CONFIG_FILES) {
@@ -87,6 +95,8 @@ export const findEasProjectId = Effect.fn("easProjectId.findEasProjectId")(funct
     ...(yield* children("packages")),
   ];
   const ids = yield* Effect.forEach(directories, projectIdsOf, { concurrency: 4 });
-  const distinct = new Set(ids.flat());
+  // An app whose project is unknown could be the one the thread works on.
+  if (ids.some((found) => found === null)) return Option.none<string>();
+  const distinct = new Set(ids.flatMap((found) => found ?? []));
   return distinct.size === 1 ? Option.some([...distinct][0]!) : Option.none<string>();
 });

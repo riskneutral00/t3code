@@ -88,6 +88,24 @@ it.effect.each([
     expected: Option.none(),
   },
   {
+    case: "gives no answer when one app sets its project from a variable",
+    files: {
+      "apps/mobile/app.config.ts": `export default {
+        extra: { eas: { projectId: process.env.EAS_PROJECT_ID } },
+      };`,
+      "apps/kiosk/app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_B } } } }),
+    },
+    expected: Option.none(),
+  },
+  {
+    case: "gives no answer when a comment's id sits beside a computed one",
+    files: {
+      "app.config.ts": `// projectId: "${ID_A}"
+        export default { extra: { eas: { projectId: process.env.EAS_PROJECT_ID } } };`,
+    },
+    expected: Option.none(),
+  },
+  {
     case: "uses app.json when the config never mentions a project id",
     files: {
       "app.config.js": `export default ({ config }) => ({ ...config, name: "Mobile" });`,

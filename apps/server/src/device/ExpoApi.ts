@@ -83,6 +83,11 @@ const credential = (
 export class ExpoApiError extends Schema.TaggedError<ExpoApiError>()("ExpoApiError", {
   operation: Schema.String,
   detail: Schema.optional(Schema.String),
+  /**
+   * Expo answered and refused, so a mutation did nothing. Otherwise (no
+   * answer, a server error, an answer that did not decode) it may have run.
+   */
+  rejected: Schema.optional(Schema.Boolean),
 }) {
   override get message(): string {
     return `Expo could not ${this.operation}${this.detail ? `: ${this.detail}` : "."}`;
@@ -163,10 +168,14 @@ const toExpoApiError = (
   credential: ExpoCredential,
   error: GraphQLClientError.GraphQLClientError,
 ): ExpoApiError => {
-  const failure = (detail: string) => new ExpoApiError({ operation, detail });
   const reason = error.reason;
   const status =
     reason._tag === "TransportError" || reason._tag === "ResponseError" ? reason.status : undefined;
+  const rejected =
+    reason._tag === "ResponseError" ||
+    reason._tag === "EncodeError" ||
+    (status !== undefined && status >= 400 && status < 500);
+  const failure = (detail: string) => new ExpoApiError({ operation, detail, rejected });
   if (status === 401 || status === 403) {
     const what = credential.source === "eas-login" ? "eas login session" : "access token";
     return failure(`the ${what} was rejected (HTTP ${status})`);
