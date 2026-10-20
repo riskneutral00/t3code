@@ -214,6 +214,7 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
   /** Finds recorded sessions by name, so a session whose id never arrived is found too. */
   const stopRecorded = (expo: ExpoApi, entries: ReadonlyArray<LedgerEntry>) => {
     const found = new Set<string>();
+    const listed = new Set<string>();
     return Effect.forEach(
       [...new Set(entries.map((entry) => entry.appId))],
       (appId) =>
@@ -247,10 +248,17 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
               { discard: true },
             ),
           ),
+          Effect.tap(() => Effect.sync(() => void listed.add(appId))),
           Effect.ignore,
         ),
       { discard: true, concurrency: 4 },
-    ).pipe(Effect.as(found as ReadonlySet<string>));
+    ).pipe(
+      Effect.as({ found, listed } as {
+        readonly found: ReadonlySet<string>;
+        /** The apps whose listing succeeded; a failed one rules nothing out. */
+        readonly listed: ReadonlySet<string>;
+      }),
+    );
   };
 
   /**
@@ -299,12 +307,14 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
       reapedAt = yield* Clock.currentTimeMillis;
       const entries = yield* readLedger;
       const owned = ownedNames();
-      const found = yield* stopRecorded(
+      const { found, listed } = yield* stopRecorded(
         expo,
         entries.filter((entry) => !owned.has(entry.name)),
       );
-      for (const [name, { until }] of uncertain) {
-        if (found.has(name) || reapedAt >= until) uncertain.delete(name);
+      for (const [name, { entry, until }] of uncertain) {
+        if (found.has(name) || (reapedAt >= until && listed.has(entry.appId))) {
+          uncertain.delete(name);
+        }
       }
     },
     reapLock.withPermit,
@@ -445,12 +455,12 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
                   Effect.tapError((error) =>
                     error.rejected
                       ? stopRecorded(expo, [entry]).pipe(
-                          Effect.flatMap((found) =>
+                          Effect.flatMap(({ found }) =>
                             found.has(name) ? Effect.void : forgetEntry(name),
                           ),
                         )
                       : stopRecorded(expo, [entry]).pipe(
-                          Effect.flatMap((found) =>
+                          Effect.flatMap(({ found }) =>
                             found.has(name)
                               ? Effect.void
                               : Effect.map(Clock.currentTimeMillis, (now) => {

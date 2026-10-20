@@ -47,6 +47,7 @@ const fakeExpo = (
     /** Expo answers the create with GraphQL errors: a refusal. */
     readonly rejectCreate?: boolean;
     readonly failStop?: () => boolean;
+    readonly failList?: () => boolean;
     readonly active?: ReadonlyArray<{ id: string; status: string; name: string }>;
     readonly previewGate?: Gate;
     readonly createGate?: Gate;
@@ -99,6 +100,9 @@ const fakeExpo = (
           );
       }
       if (operation === "T3StopEasSimulatorSession" && options.failStop?.()) {
+        return HttpClientResponse.fromWeb(request, new Response("bad gateway", { status: 502 }));
+      }
+      if (operation === "T3ActiveEasSimulatorSessions" && options.failList?.()) {
         return HttpClientResponse.fromWeb(request, new Response("bad gateway", { status: 502 }));
       }
       const data =
@@ -385,6 +389,39 @@ describe("EAS Simulator host", () => {
       const ready = yield* host.ensureReady(() => Effect.void);
       // Listing sweeps before anything starts, so the old session is stopped first.
       const [catalogDevice] = (yield* ready.devices.list).devices;
+      expect(expo.stopped()).toContain("old-session");
+      expect(yield* ready.devices.boot(catalogDevice!)).toBe("session-1");
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+
+  it.effect("keeps an old record counted while the listing that would find it fails", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const server = yield* ServerConfig.ServerConfig;
+      const ledger = path.join(server.stateDir, "device", "eas", "eas.json");
+      yield* fs.makeDirectory(path.dirname(ledger), { recursive: true });
+      yield* fs.writeFileString(
+        ledger,
+        JSON.stringify([
+          { name: "T3 Code · EAS Simulator · old", appId: APP_ID, recordedAt: -10 * 60_000 },
+        ]),
+      );
+      let listFails = true;
+      const expo = fakeExpo({
+        active: [
+          { id: "old-session", status: "IN_PROGRESS", name: "T3 Code · EAS Simulator · old" },
+        ],
+        failList: () => listFails,
+      });
+      const host = yield* makeHost(expo, config({ maxConcurrentSessions: 1 }), yield* Scope.make());
+      const ready = yield* host.ensureReady(() => Effect.void);
+      const [catalogDevice] = (yield* ready.devices.list).devices;
+      // The sweep could not look, so the record still holds the slot.
+      const refused = yield* ready.devices.boot(catalogDevice!).pipe(Effect.flip);
+      expect(refused.message).toContain("still being cleaned up");
+      listFails = false;
+      yield* ready.devices.list;
       expect(expo.stopped()).toContain("old-session");
       expect(yield* ready.devices.boot(catalogDevice!)).toBe("session-1");
     }).pipe(Effect.scoped, Effect.provide(layer)),
