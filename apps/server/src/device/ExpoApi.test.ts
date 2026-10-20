@@ -183,15 +183,45 @@ describe("Expo API", () => {
       )
         .stop("session-1")
         .pipe(Effect.flip);
+      const transient = yield* makeExpoApi(
+        respond(
+          Response.json({
+            errors: [
+              {
+                message: "Something went wrong",
+                extensions: { errorCode: "INTERNAL_SERVER_ERROR", isTransient: true },
+              },
+            ],
+          }),
+        ),
+        credential,
+      )
+        .stop("session-1")
+        .pipe(Effect.flip);
+      const ran = yield* makeExpoApi(
+        respond(
+          Response.json({
+            data: { deviceRunSession: { stopDeviceRunSession: null } },
+            errors: [
+              { message: "Session is already stopping", extensions: { errorCode: "CONFLICT" } },
+            ],
+          }),
+        ),
+        credential,
+      )
+        .stop("session-1")
+        .pipe(Effect.flip);
       // Expo answered and refused the first two: nothing was done. GraphQL
-      // errors at a server error, or an internal error, may come from a
-      // request that ran.
+      // errors at a server error, a transient or internal error, or errors
+      // beside data, may come from a request that ran.
       expect([
         graphQl.rejected,
         rejected.rejected,
         serverError.rejected,
         internalError.rejected,
-      ]).toEqual([true, true, false, false]);
+        transient.rejected,
+        ran.rejected,
+      ]).toEqual([true, true, false, false, false, false]);
     }),
   );
 });

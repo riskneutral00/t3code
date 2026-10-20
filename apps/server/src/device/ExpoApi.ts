@@ -172,16 +172,23 @@ const toExpoApiError = (
   const status =
     reason._tag === "TransportError" || reason._tag === "ResponseError" ? reason.status : undefined;
   // Expo refused: a request it never got, a 4xx, or GraphQL errors at a 2xx
-  // or 4xx. GraphQL errors at a 5xx, or an internal error at any status,
-  // came from a request that may have run.
-  const internal =
+  // or 4xx before it ran anything. GraphQL errors at a 5xx, beside `data`
+  // (the request ran), or marked transient or internal (`isTransient` and
+  // `errorCode`, which eas-cli reads) came from a request that may have run.
+  const uncertain =
     reason._tag === "ResponseError" &&
-    reason.errors.some((graphQlError) => graphQlError.extensions?.code === "INTERNAL_SERVER_ERROR");
+    (reason.data !== undefined ||
+      reason.errors.some(
+        ({ extensions }) =>
+          extensions?.isTransient === true ||
+          extensions?.errorCode === "INTERNAL_SERVER_ERROR" ||
+          extensions?.code === "INTERNAL_SERVER_ERROR",
+      ));
   const rejected =
     reason._tag === "EncodeError" ||
     (status !== undefined &&
       status < 500 &&
-      !internal &&
+      !uncertain &&
       (status >= 400 || reason._tag === "ResponseError"));
   const failure = (detail: string) => new ExpoApiError({ operation, detail, rejected });
   if (status === 401 || status === 403) {

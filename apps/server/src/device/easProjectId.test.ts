@@ -138,6 +138,31 @@ it.effect.each([
     expected: Option.some(ID_B),
   },
   {
+    case: "gives no answer when a config builds the project id in a template",
+    files: {
+      "app.config.js":
+        "export default { extra: { eas: { projectId: `${process.env.EAS_PROJECT_ID}` } } };",
+      "app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_A } } } }),
+    },
+    expected: Option.none(),
+  },
+  {
+    case: "reads a static config that is not wrapped in `expo`",
+    files: {
+      "apps/mobile/app.config.json": JSON.stringify({ extra: { eas: { projectId: ID_A } } }),
+      "apps/README.md": "one app",
+    },
+    expected: Option.some(ID_A),
+  },
+  {
+    case: "does not guess between an unwrapped static config and a wrapped one",
+    files: {
+      "apps/mobile/app.config.json": JSON.stringify({ extra: { eas: { projectId: ID_A } } }),
+      "apps/kiosk/app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_B } } } }),
+    },
+    expected: Option.none(),
+  },
+  {
     case: "uses app.json when the config never mentions a project id",
     files: {
       "app.config.js": `export default ({ config }) => ({ ...config, name: "Mobile" });`,

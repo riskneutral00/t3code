@@ -18,19 +18,15 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const QUOTED_PROJECT_ID = /projectId["']?\s*:\s*["'`]([^"'`\n]*)["'`]/gi;
 const PROJECT_ID_MENTION = /\bprojectId\b/gi;
 
+const Extra = Schema.optional(
+  Schema.Struct({
+    eas: Schema.optional(Schema.Struct({ projectId: Schema.optional(Schema.String) })),
+  }),
+);
+// Expo reads a static config wrapped in `expo` or not.
 const decodeAppJson = Schema.decodeUnknownOption(
   Schema.fromJsonString(
-    Schema.Struct({
-      expo: Schema.optional(
-        Schema.Struct({
-          extra: Schema.optional(
-            Schema.Struct({
-              eas: Schema.optional(Schema.Struct({ projectId: Schema.optional(Schema.String) })),
-            }),
-          ),
-        }),
-      ),
-    }),
+    Schema.Struct({ expo: Schema.optional(Schema.Struct({ extra: Extra })), extra: Extra }),
   ),
 );
 
@@ -59,7 +55,8 @@ const projectIdsOf = Effect.fn("easProjectId.projectIdsOf")(function* (dir: stri
     // answer unknown.
     const mentions = source.match(PROJECT_ID_MENTION)?.length ?? 0;
     const quoted = [...source.matchAll(QUOTED_PROJECT_ID)].map((match) => match[1]!);
-    if (quoted.length !== mentions) return null;
+    // A template that interpolates could be any project too.
+    if (quoted.length !== mentions || quoted.some((id) => id.includes("${"))) return null;
     ids.push(...quoted.filter((id) => UUID.test(id)).map((id) => id.toLowerCase()));
   }
   for (const file of JSON_CONFIG_FILES) {
@@ -72,7 +69,7 @@ const projectIdsOf = Effect.fn("easProjectId.projectIdsOf")(function* (dir: stri
     // A config that is there but cannot be read could name any project.
     if (json === null) return null;
     const id = Option.flatMap(json, decodeAppJson).pipe(
-      Option.flatMap((value) => Option.fromNullishOr(value.expo?.extra?.eas?.projectId)),
+      Option.flatMap((value) => Option.fromNullishOr((value.expo ?? value).extra?.eas?.projectId)),
       Option.filter((id) => UUID.test(id)),
     );
     if (Option.isSome(id)) {
@@ -94,9 +91,21 @@ export const findEasProjectId = Effect.fn("easProjectId.findEasProjectId")(funct
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const isDirectory = (child: string) =>
+    fs.stat(child).pipe(
+      Effect.map((info) => info.type === "Directory"),
+      Effect.orElseSucceed(() => false),
+    );
+  // Only a directory can be an app; a README or .DS_Store beside them is not one.
   const children = (parent: string) =>
     fs.readDirectory(path.join(workspaceRoot, parent)).pipe(
       Effect.map((names) => names.map((name) => path.join(workspaceRoot, parent, name))),
+      Effect.flatMap((paths) =>
+        Effect.forEach(paths, (child) =>
+          Effect.map(isDirectory(child), (directory) => (directory ? [child] : [])),
+        ),
+      ),
+      Effect.map((kept) => kept.flat()),
       Effect.orElseSucceed(() => []),
     );
   const directories = [
