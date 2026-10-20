@@ -427,39 +427,53 @@ describe("EAS Simulator host", () => {
     }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 
-  it.effect("lets go of a record Expo has ended by now although its listing keeps failing", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const server = yield* ServerConfig.ServerConfig;
-      const ledger = path.join(server.stateDir, "device", "eas", "eas.json");
-      yield* fs.makeDirectory(path.dirname(ledger), { recursive: true });
-      yield* fs.writeFileString(
-        ledger,
-        JSON.stringify([
-          { name: "T3 Code · EAS Simulator · gone", appId: APP_ID, recordedAt: -181 * 60_000 },
-          {
-            name: "T3 Code · EAS Simulator · refused",
-            appId: APP_ID,
-            recordedAt: -181 * 60_000,
-            refused: true,
-          },
-        ]),
-      );
-      // The app is gone, say: listing it fails for good.
-      const expo = fakeExpo({ failList: () => true });
-      const host = yield* makeHost(expo, config({ maxConcurrentSessions: 1 }), yield* Scope.make());
-      const ready = yield* host.ensureReady(() => Effect.void);
-      const [catalogDevice] = (yield* ready.devices.list).devices;
-      expect(yield* ready.devices.boot(catalogDevice!)).toBe("session-1");
-      const names = (JSON.parse(yield* fs.readFileString(ledger)) as Array<{ name: string }>).map(
-        (entry) => entry.name,
-      );
-      // Only the new session's own record remains.
-      expect(
-        names.filter((name) => !name.endsWith("session-1") && !/[0-9a-f]{6}$/.test(name)),
-      ).toEqual([]);
-    }).pipe(Effect.scoped, Effect.provide(layer)),
+  it.effect(
+    "frees the slot of a record Expo has ended by now, but keeps it until a listing confirms",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const server = yield* ServerConfig.ServerConfig;
+        const ledger = path.join(server.stateDir, "device", "eas", "eas.json");
+        yield* fs.makeDirectory(path.dirname(ledger), { recursive: true });
+        yield* fs.writeFileString(
+          ledger,
+          JSON.stringify([
+            { name: "T3 Code · EAS Simulator · gone", appId: APP_ID, recordedAt: -181 * 60_000 },
+            {
+              name: "T3 Code · EAS Simulator · refused",
+              appId: APP_ID,
+              recordedAt: -181 * 60_000,
+              refused: true,
+            },
+            // No queue holds a session for a day: forgotten unconfirmed.
+            {
+              name: "T3 Code · EAS Simulator · ancient",
+              appId: APP_ID,
+              recordedAt: -25 * 60 * 60_000,
+            },
+          ]),
+        );
+        // The app is gone, say: listing it fails for good.
+        const expo = fakeExpo({ failList: () => true });
+        const host = yield* makeHost(
+          expo,
+          config({ maxConcurrentSessions: 1 }),
+          yield* Scope.make(),
+        );
+        const ready = yield* host.ensureReady(() => Effect.void);
+        const [catalogDevice] = (yield* ready.devices.list).devices;
+        expect(yield* ready.devices.boot(catalogDevice!)).toBe("session-1");
+        const names = (JSON.parse(yield* fs.readFileString(ledger)) as Array<{ name: string }>).map(
+          (entry) => entry.name,
+        );
+        // The listing never confirmed the two: a queued session could still be
+        // running, so their records stay for the reaper.
+        expect(names.filter((name) => !/[0-9a-f]{6}$/.test(name))).toEqual([
+          "T3 Code · EAS Simulator · gone",
+          "T3 Code · EAS Simulator · refused",
+        ]);
+      }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 
   it.effect(

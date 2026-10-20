@@ -84,12 +84,14 @@ const decodeLedger = Schema.decodeUnknownEffect(Ledger);
 const encodeLedger = Schema.encodeSync(Ledger);
 // How often listing looks for recorded sessions this host no longer tracks.
 const REAP_INTERVAL_MS = 60_000;
-// Expo ends every session within 115 minutes. A recorded session Expo does not
-// list (not showing yet, or past the first page) is only forgotten once it
-// cannot be running any more: Expo's longest session runs 115 minutes from
-// when it is ready, which can take a while after it is made, plus five
-// minutes of cleanup.
+// Expo's longest session runs 115 minutes from when it is ready, plus five
+// minutes of cleanup. A recorded session Expo does not list (not showing
+// yet, or past the first page) stops counting against the limit after this
+// long, and its record is forgotten once a listing confirms it is not
+// running. Being ready can wait on Expo's queue, which has no bound, so the
+// record outlives the slot: only after a day is it forgotten unconfirmed.
 const RECORD_LIFETIME_MS = 180 * 60_000;
+const RECORD_MAX_AGE_MS = 24 * 60 * 60_000;
 // Expo lists a session it made within seconds; a create with an unknown
 // outcome stops counting against the limit once it has had this long.
 const UNCERTAIN_CREATE_MS = 5 * 60_000;
@@ -324,11 +326,15 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
           uncertain.delete(name);
         }
       }
-      // Expo has ended these by now, whatever the listing says (the app may
-      // be gone, or belong to another account): slot and record go.
+      // Expo has ended these by now unless they waited in its queue: the slot
+      // goes whatever the listing says (the app may be gone, or belong to
+      // another account); the record goes once a listing confirms Expo does
+      // not run it, or once no queue could have held it.
       for (const entry of leftovers) {
-        if (reapedAt - entry.recordedAt > RECORD_LIFETIME_MS) {
-          uncertain.delete(entry.name);
+        const age = reapedAt - entry.recordedAt;
+        if (age > RECORD_LIFETIME_MS) uncertain.delete(entry.name);
+        if (found.has(entry.name)) continue;
+        if ((age > RECORD_LIFETIME_MS && listed.has(entry.appId)) || age > RECORD_MAX_AGE_MS) {
           yield* forgetEntry(entry.name);
         }
       }
