@@ -75,6 +75,8 @@ const LedgerEntry = Schema.Struct({
   name: Schema.String,
   appId: Schema.String,
   recordedAt: Schema.Number,
+  /** Expo refused the create: nothing should run, but the reaper still looks. */
+  refused: Schema.optional(Schema.Boolean),
 });
 type LedgerEntry = typeof LedgerEntry.Type;
 const Ledger = Schema.fromJsonString(Schema.Array(LedgerEntry));
@@ -197,6 +199,14 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
       ),
     );
   }, ledgerLock.withPermit);
+  const markRefused = (name: string) =>
+    writeLedger((entries) =>
+      entries.map((entry) => (entry.name === name ? { ...entry, refused: true } : entry)),
+    ).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("Could not update the EAS session record", { name, cause }),
+      ),
+    );
   const forgetEntry = (name: string) =>
     writeLedger((entries) => entries.filter((entry) => entry.name !== name)).pipe(
       Effect.catch((cause) =>
@@ -294,7 +304,8 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
     const owned = ownedNames();
     for (const entry of yield* readLedger) {
       const until = Math.max(entry.recordedAt + UNCERTAIN_CREATE_MS, now);
-      if (!owned.has(entry.name)) uncertain.set(entry.name, { entry, until });
+      // A refused create made nothing: its record is for the reaper only.
+      if (!owned.has(entry.name) && !entry.refused) uncertain.set(entry.name, { entry, until });
     }
   }).pipe(Effect.ignore);
 
@@ -462,7 +473,11 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
                   // stays for the reaper in case the refusal was misread.
                   Effect.tapError((error) =>
                     error.rejected
-                      ? stopRecorded(expo, [entry]).pipe(Effect.asVoid)
+                      ? stopRecorded(expo, [entry]).pipe(
+                          Effect.flatMap(({ found }) =>
+                            found.has(name) ? Effect.void : markRefused(name),
+                          ),
+                        )
                       : stopRecorded(expo, [entry]).pipe(
                           Effect.flatMap(({ found }) =>
                             found.has(name)

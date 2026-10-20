@@ -453,6 +453,39 @@ describe("EAS Simulator host", () => {
     }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 
+  it.effect(
+    "keeps a refused create's record for the reaper without counting it after a restart",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const server = yield* ServerConfig.ServerConfig;
+        const ledger = path.join(server.stateDir, "device", "eas", "eas.json");
+        // Expo refuses the create and lists nothing.
+        const expo = fakeExpo({ rejectCreate: true, omitCreatedFromActive: true });
+        const first = yield* Scope.make();
+        const host = yield* makeHost(expo, config({ maxConcurrentSessions: 1 }), first);
+        const ready = yield* host.ensureReady(() => Effect.void);
+        const [catalogDevice] = (yield* ready.devices.list).devices;
+        yield* ready.devices.boot(catalogDevice!).pipe(Effect.flip);
+        const entries = JSON.parse(yield* fs.readFileString(ledger)) as Array<{
+          refused?: boolean;
+        }>;
+        expect(entries.map((entry) => entry.refused)).toEqual([true]);
+        yield* Scope.close(first, Exit.void);
+        // A later server cannot even list the app: the record must not hold a slot.
+        const later = fakeExpo({ failList: () => true });
+        const restarted = yield* makeHost(
+          later,
+          config({ maxConcurrentSessions: 1 }),
+          yield* Scope.make(),
+        );
+        const readyAgain = yield* restarted.ensureReady(() => Effect.void);
+        const [device] = (yield* readyAgain.devices.list).devices;
+        expect(yield* readyAgain.devices.boot(device!)).toBe("session-1");
+      }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+
   it.effect("stops the session a refused create made anyway", () =>
     Effect.gen(function* () {
       // Expo refuses the create but lists a session by its name.
