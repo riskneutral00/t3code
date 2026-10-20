@@ -977,6 +977,9 @@ export function createDeviceStreamClient(
       releaseImage = null;
       events.onCanvasVideo?.();
     }
+    // MJPEG may have shown frames already: say the stream is connecting again
+    // rather than leave a blank canvas until the first WebRTC frame.
+    connecting("Switching to WebRTC.");
     void readIosWebRtc(settings);
   };
 
