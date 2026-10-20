@@ -302,6 +302,18 @@ it.effect.each([
     expected: Option.none(),
   },
   {
+    case: "gives no answer when another service's project id sits beside a spread over app.json's",
+    files: {
+      "app.config.js": `module.exports = ({ config }) => ({
+        ...config,
+        ...require("./app.local.js"),
+        web: { config: { firebase: { projectId: "my-firebase-app" } } },
+      });`,
+      "app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_A } } } }),
+    },
+    expected: Option.none(),
+  },
+  {
     case: "reads app.json's project id through a config that only spreads the config itself",
     files: {
       "app.config.js": `module.exports = ({ config }) => ({

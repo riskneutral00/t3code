@@ -103,13 +103,13 @@ const projectIdsOf = Effect.fn("easProjectId.projectIdsOf")(function* (dir: stri
     const quoted = entries.map((match) => match[1]!);
     // A template that interpolates could be any project too, and so could
     // one a spread after the entry, or an assignment anywhere, replaces;
-    // with no entry here, app.json's is the one a foreign spread replaces.
+    // with no EAS id here, app.json's is the one a foreign spread replaces.
     if (
       quoted.length !== mentions ||
       quoted.some((id) => id.includes("${")) ||
       ASSIGNS_OVER.test(source) ||
       entries.some((match) => SPREAD_LATER.test(source.slice(match.index + match[0].length))) ||
-      (entries.length === 0 && !spreadsOnlyConfig(source))
+      (!quoted.some((id) => UUID.test(id)) && !spreadsOnlyConfig(source))
     ) {
       return null;
     }
