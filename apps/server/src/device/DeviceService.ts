@@ -814,7 +814,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
         ),
       retryHost,
       inspect,
-      easAccount: (input) =>
+      easAccount: () =>
         Effect.fail(
           new DeviceEasAccountError({
             reason: "EAS accounts are unavailable in this device service.",
