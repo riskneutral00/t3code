@@ -100,10 +100,8 @@ export type DeviceEasAccount = typeof DeviceEasAccount.Type;
 /** Checking an Expo credential failed; no device host is involved yet. */
 export class DeviceEasAccountError extends Schema.TaggedError<DeviceEasAccountError>()(
   "DeviceEasAccountError",
-  {
-    reason: Schema.String,
-    cause: Schema.optional(Schema.Defect()),
-  },
+  // No cause: this error reaches the browser, and the reason already says what Expo answered.
+  { reason: Schema.String },
 ) {
   override get message(): string {
     return this.reason;
@@ -196,6 +194,8 @@ const deviceServiceStateFields = {
   supportsHostRetry: Schema.optional(Schema.Boolean),
   supportsToolUpdate: Schema.optional(Schema.Boolean),
   supportsToolInspection: Schema.optional(Schema.Boolean),
+  /** Servers from before EAS hosts ignore `easDeviceHosts`, so clients offer them only when set. */
+  supportsEasHosts: Schema.optional(Schema.Boolean),
   hostStatus: DeviceHostStatus,
   hostStatusDetail: Schema.optional(Schema.String),
   hostStatuses: DeviceHostStatuses,

@@ -208,6 +208,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       supportsHostRetry: true,
       supportsToolUpdate: installTool !== undefined,
       supportsToolInspection: true,
+      supportsEasHosts: true,
       hosts: initialHosts,
       hostStatus: initialSettings.enabled ? "idle" : "disabled",
       hostStatuses: {},
@@ -1104,7 +1105,7 @@ export const make = Effect.gen(function* () {
       return { signedInAs: viewer.name, credentialSource: credential.source, apps: viewer.apps };
     }).pipe(
       Effect.provide(easContext),
-      Effect.mapError((cause) => new DeviceEasAccountError({ reason: cause.message, cause })),
+      Effect.mapError((cause) => new DeviceEasAccountError({ reason: cause.message })),
       Effect.withSpan("DeviceService.easAccount"),
     );
 
