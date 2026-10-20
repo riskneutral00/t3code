@@ -591,7 +591,9 @@ describe("EAS Simulator host", () => {
           }),
       };
       let status = "IN_PROGRESS";
-      const expo = fakeExpo({ status: () => status });
+      // Nothing is listed, so the close's own sweep writes nothing: only the
+      // write in flight can hold the close.
+      const expo = fakeExpo({ status: () => status, omitCreatedFromActive: true });
       const first = yield* Scope.make();
       const old = yield* makeHost(expo, config(), first).pipe(
         Effect.provideService(FileSystem.FileSystem, gatedFs),
@@ -606,8 +608,13 @@ describe("EAS Simulator host", () => {
       const listing = yield* oldReady.devices.list.pipe(Effect.forkChild);
       yield* Deferred.await(gate.requested);
       // Settings saved while that write is in flight: closing waits for it.
+      const listingsBefore = expo.named("T3ActiveEasSimulatorSessions").length;
       const closing = yield* Scope.close(first, Exit.void).pipe(Effect.forkChild);
-      yield* TestClock.adjust("1 second");
+      // The close reads the record and lists sessions in real time: wait until
+      // its sweep has listed, then a little more, before looking at it.
+      const pause = Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 10)));
+      while (expo.named("T3ActiveEasSimulatorSessions").length === listingsBefore) yield* pause;
+      for (let i = 0; i < 5; i++) yield* pause;
       expect(closing.pollUnsafe()).toBeUndefined();
       yield* Deferred.succeed(gate.release, undefined);
       yield* Fiber.join(listing);
