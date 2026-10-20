@@ -332,6 +332,30 @@ describe("EAS Simulator host", () => {
     }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 
+  it.effect("counts a fresh record a previous server left until Expo lists it or would have", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const server = yield* ServerConfig.ServerConfig;
+      const ledger = path.join(server.stateDir, "device", "eas", "eas.json");
+      yield* fs.makeDirectory(path.dirname(ledger), { recursive: true });
+      yield* fs.writeFileString(
+        ledger,
+        JSON.stringify([{ name: "T3 Code · EAS Simulator · new", appId: APP_ID, recordedAt: 0 }]),
+      );
+      const expo = fakeExpo();
+      const host = yield* makeHost(expo, config({ maxConcurrentSessions: 1 }), yield* Scope.make());
+      const ready = yield* host.ensureReady(() => Effect.void);
+      const [catalogDevice] = (yield* ready.devices.list).devices;
+      // The record is fresh and Expo does not list it yet: it holds the slot.
+      const refused = yield* ready.devices.boot(catalogDevice!).pipe(Effect.flip);
+      expect(refused.message).toContain("still being cleaned up");
+      yield* TestClock.adjust("6 minutes");
+      yield* ready.devices.list;
+      expect(yield* ready.devices.boot(catalogDevice!)).toBe("session-1");
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+
   it.effect("records a session before creating it and refuses to start without the record", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

@@ -129,16 +129,16 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
   // them alone and they count against the limit.
   const starting = new Set<string>();
   const unresolved = new Map<string, { readonly sessionId: string }>();
-  // Creates whose outcome is unknown (no answer, or a server error): Expo may
-  // have made the session. Each listing looks for it, and it counts against
-  // the limit until found or until Expo would have listed it by now.
+  // Creates whose outcome is unknown (no answer, or a server error), and
+  // fresh records a previous server left: Expo may have made the session.
+  // Each listing looks for it, and it counts against the limit until found
+  // or until Expo would have listed it by now. The reaper handles these.
   const uncertain = new Map<string, { readonly entry: LedgerEntry; readonly until: number }>();
   const ownedNames = () =>
     new Set([
       ...[...sessions.values()].map((session) => session.name),
       ...starting,
       ...unresolved.keys(),
-      ...uncertain.keys(),
     ]);
   // Bumped whenever the host stops its sessions, so a start that finishes
   // afterwards stops its own session instead of leaving it untracked.
@@ -273,31 +273,37 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
       Effect.ignore,
     );
 
-  /** Looks for sessions creates with an unknown outcome may have made. */
-  const resolveUncertain = (expo: ExpoApi, now: number) =>
-    Effect.forEach(
-      [...uncertain],
-      ([name, { entry, until }]) =>
-        stopRecorded(expo, [entry]).pipe(
-          Effect.map((found) => {
-            // Found (stopped, or unresolved if that failed) or long enough
-            // unlisted: the slot frees, and the record stays for the reaper.
-            if (found.has(name) || now > until) uncertain.delete(name);
-          }),
-        ),
-      { discard: true },
-    );
+  /**
+   * Fresh records a previous server left count against the limit until Expo
+   * lists them or would have by now, so a restart cannot start past it.
+   */
+  const adoptRecorded = Effect.gen(function* () {
+    const now = yield* Clock.currentTimeMillis;
+    const owned = ownedNames();
+    for (const entry of yield* readLedger) {
+      const until = entry.recordedAt + UNCERTAIN_CREATE_MS;
+      if (!owned.has(entry.name) && until > now) uncertain.set(entry.name, { entry, until });
+    }
+  }).pipe(Effect.ignore);
 
-  /** Sessions a previous server, or a start that failed, recorded but this host does not own. */
+  /**
+   * Stops recorded sessions this host does not own: a previous server's, or
+   * a failed or uncertain start's. An uncertain one found (stopped, or
+   * unresolved if that failed) or long enough unlisted frees its slot; its
+   * record stays until it expires.
+   */
   const reapLeftovers = (expo: ExpoApi) =>
     Effect.gen(function* () {
       reapedAt = yield* Clock.currentTimeMillis;
       const entries = yield* readLedger;
       const owned = ownedNames();
-      yield* stopRecorded(
+      const found = yield* stopRecorded(
         expo,
         entries.filter((entry) => !owned.has(entry.name)),
       );
+      for (const [name, { until }] of uncertain) {
+        if (found.has(name) || reapedAt > until) uncertain.delete(name);
+      }
     }).pipe(
       Effect.catch((cause) =>
         Effect.logWarning("Could not stop recorded EAS Simulator sessions", { cause }),
@@ -525,14 +531,14 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
     );
     const reapDue = now - reapedAt > REAP_INTERVAL_MS;
     if (stale.length === 0 && unresolved.size === 0 && uncertain.size === 0 && !reapDue) return;
-    if (reapDue) reapedAt = now;
+    const reap = reapDue || uncertain.size > 0;
+    if (reap) reapedAt = now;
     const expo = yield* api;
     yield* Effect.forEach(
       [...unresolved],
       ([name, { sessionId }]) => retryUnresolved(expo, name, sessionId),
       { discard: true, concurrency: 4 },
     );
-    yield* resolveUncertain(expo, now);
     yield* Effect.forEach(
       stale,
       (session) =>
@@ -550,7 +556,7 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
         ).pipe(Effect.ignore),
       { discard: true, concurrency: 4 },
     );
-    if (reapDue) yield* reapLeftovers(expo);
+    if (reap) yield* reapLeftovers(expo);
   }).pipe(Effect.ignore);
 
   /**
@@ -694,6 +700,7 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
   const ensureReady: DeviceHost.DeviceHost["Service"]["ensureReady"] = () =>
     Effect.gen(function* () {
       if (ready) return ready;
+      yield* adoptRecorded;
       // Without a credential the host is still ready: opening a device then
       // says how to sign in, and listing reaps once one is there.
       yield* FiberSet.run(background)(api.pipe(Effect.flatMap(reapLeftovers), Effect.ignore));
@@ -732,9 +739,7 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
       ([name, { sessionId }]) => retryUnresolved(expo, name, sessionId),
       { discard: true, concurrency: 4 },
     );
-    // Also stop a recorded session a create with an unknown outcome made
-    // after all; the reaper skips names the host still owns.
-    uncertain.clear();
+    // Also stop a recorded session a create with an unknown outcome made after all.
     yield* reapLeftovers(expo);
   }).pipe(Effect.ignore);
   yield* Effect.addFinalizer(() => stopAll);
