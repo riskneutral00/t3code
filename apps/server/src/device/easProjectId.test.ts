@@ -205,6 +205,33 @@ it.effect.each([
     expected: Option.none(),
   },
   {
+    case: "gives no answer when a spread after the project id hides behind a comment",
+    files: {
+      "apps/mobile/app.config.js": `import { easOverrides } from "./app.shared.js";
+        export default { extra: { eas: { projectId: "${ID_A}" /* } */, ...easOverrides } } };`,
+    },
+    expected: Option.none(),
+  },
+  {
+    case: "gives no answer when a spread in an enclosing object may replace the project id",
+    files: {
+      "apps/mobile/app.config.js": `import { extraOverrides } from "./app.shared.js";
+        export default { extra: { eas: { projectId: "${ID_A}" }, ...extraOverrides } };`,
+    },
+    expected: Option.none(),
+  },
+  {
+    case: "gives no answer when the config is assigned over after naming the project id",
+    files: {
+      "app.config.js": `export default ({ config }) => {
+        config.extra = { eas: { projectId: "${ID_A}" } };
+        Object.assign(config.extra.eas, JSON.parse(process.env.EAS_OVERRIDES ?? "{}"));
+        return config;
+      };`,
+    },
+    expected: Option.none(),
+  },
+  {
     case: "reads a project id that follows spreads",
     files: {
       "app.config.js": `export default ({ config }) => ({

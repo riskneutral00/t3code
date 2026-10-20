@@ -26,19 +26,11 @@ const PROJECT_ID_MENTION = /\bprojectId\b/gi;
 // app config but a file made to keep the server busy.
 const MAX_CONFIG_LENGTH = 256 * 1024;
 
-/** Whether a spread follows the entry at `from` in its object, which may replace it. */
-const spreadFollows = (source: string, from: number): boolean => {
-  let depth = 0;
-  for (let i = from; i < source.length; i++) {
-    const char = source[i];
-    if (char === "{" || char === "(" || char === "[") depth++;
-    else if (char === "}" || char === ")" || char === "]") {
-      if (depth === 0) return false;
-      depth--;
-    } else if (depth === 0 && source.startsWith("...", i)) return true;
-  }
-  return false;
-};
+// Text after an entry that may replace it from elsewhere: a spread, or
+// Object.assign. Anywhere after it, at any depth, since a spread in an
+// enclosing object replaces the entry too, and a comment or string could
+// hide a brace from a scan of the entry's own object.
+const REPLACES_LATER = /\.\.\.|\bObject\.assign\b/;
 
 const Extra = Schema.optional(
   Schema.Struct({
@@ -80,12 +72,12 @@ const projectIdsOf = Effect.fn("easProjectId.projectIdsOf")(function* (dir: stri
     const mentions = source.match(PROJECT_ID_MENTION)?.length ?? 0;
     const entries = [...source.matchAll(QUOTED_PROJECT_ID)];
     const quoted = entries.map((match) => match[1]!);
-    // A template that interpolates could be any project too, and so could a
-    // spread after the entry in its object.
+    // A template that interpolates could be any project too, and so could
+    // one a spread or Object.assign after the entry replaces.
     if (
       quoted.length !== mentions ||
       quoted.some((id) => id.includes("${")) ||
-      entries.some((match) => spreadFollows(source, match.index + match[0].length))
+      entries.some((match) => REPLACES_LATER.test(source.slice(match.index + match[0].length)))
     ) {
       return null;
     }
