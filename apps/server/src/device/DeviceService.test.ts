@@ -929,6 +929,7 @@ it.effect.each([LOCAL_DEVICE_HOST_ID, "ssh-fixture"])(
       };
       const host: DeviceHost.DeviceHost["Service"] = {
         id: hostId,
+        label: "Test device host",
         summary: Effect.succeed({
           id: hostId,
           kind: hostId === LOCAL_DEVICE_HOST_ID ? "local" : "ssh",
