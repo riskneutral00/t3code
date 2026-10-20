@@ -427,6 +427,32 @@ describe("EAS Simulator host", () => {
     }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 
+  it.effect("lets go of a record Expo has ended by now although its listing keeps failing", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const server = yield* ServerConfig.ServerConfig;
+      const ledger = path.join(server.stateDir, "device", "eas", "eas.json");
+      yield* fs.makeDirectory(path.dirname(ledger), { recursive: true });
+      yield* fs.writeFileString(
+        ledger,
+        JSON.stringify([
+          { name: "T3 Code · EAS Simulator · gone", appId: APP_ID, recordedAt: -121 * 60_000 },
+        ]),
+      );
+      // The app is gone, say: listing it fails for good.
+      const expo = fakeExpo({ failList: () => true });
+      const host = yield* makeHost(expo, config({ maxConcurrentSessions: 1 }), yield* Scope.make());
+      const ready = yield* host.ensureReady(() => Effect.void);
+      const [catalogDevice] = (yield* ready.devices.list).devices;
+      expect(yield* ready.devices.boot(catalogDevice!)).toBe("session-1");
+      const names = (JSON.parse(yield* fs.readFileString(ledger)) as Array<{ name: string }>).map(
+        (entry) => entry.name,
+      );
+      expect(names).not.toContain("T3 Code · EAS Simulator · gone");
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+
   it.effect("stops the session a refused create made anyway", () =>
     Effect.gen(function* () {
       // Expo refuses the create but lists a session by its name.

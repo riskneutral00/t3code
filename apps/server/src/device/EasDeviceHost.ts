@@ -314,6 +314,11 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
       for (const [name, { entry, until }] of uncertain) {
         if (found.has(name) || (reapedAt >= until && listed.has(entry.appId))) {
           uncertain.delete(name);
+        } else if (reapedAt - entry.recordedAt > RECORD_LIFETIME_MS) {
+          // Expo has ended it by now, whatever the listing says (the app may
+          // be gone, or belong to another account): the slot and record go.
+          uncertain.delete(name);
+          yield* forgetEntry(name);
         }
       }
     },
@@ -451,14 +456,11 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
                 .pipe(
                   // Unless Expo refused, it may have made the session before
                   // failing to answer. Unlisted, it stays counted for a while.
-                  // Refused, it made nothing, unless it lists the session anyway.
+                  // Refused, it made nothing: the slot frees, but the record
+                  // stays for the reaper in case the refusal was misread.
                   Effect.tapError((error) =>
                     error.rejected
-                      ? stopRecorded(expo, [entry]).pipe(
-                          Effect.flatMap(({ found }) =>
-                            found.has(name) ? Effect.void : forgetEntry(name),
-                          ),
-                        )
+                      ? stopRecorded(expo, [entry]).pipe(Effect.asVoid)
                       : stopRecorded(expo, [entry]).pipe(
                           Effect.flatMap(({ found }) =>
                             found.has(name)
