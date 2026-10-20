@@ -307,6 +307,21 @@ it.effect.each(["\r", "\u2028", "\u2029"])(
     }).pipe(Effect.scoped, Effect.provide(layer)),
 );
 
+it.effect("gives no answer at once for a config too large to be one", () =>
+  Effect.gen(function* () {
+    // Each entry followed by an unterminated comment scans to the end of the
+    // file: quadratic on a file made for it. A config this large is unknown.
+    const entry = `projectId: "${ID_A.slice(0, 9)}" /* `;
+    const root = yield* workspace({
+      "apps/mobile/app.config.ts": entry.repeat(Math.ceil((1024 * 1024) / entry.length)),
+      "apps/kiosk/app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_B } } } }),
+    });
+    const startedAt = performance.now();
+    expect(yield* findEasProjectId(root)).toEqual(Option.none());
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
+  }).pipe(Effect.scoped, Effect.provide(layer)),
+);
+
 it.effect("answers at once for a long comment before the rest of a joined id", () =>
   Effect.gen(function* () {
     // A comment with many slashes before a continuation made an earlier

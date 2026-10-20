@@ -22,6 +22,9 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const QUOTED_PROJECT_ID =
   /\bprojectId["']?\s*:\s*["'`]([^"'`\n]*)["'`](?=(?:\s|\/\/[^\n\r\u2028\u2029]*(?:[\n\r\u2028\u2029]|$)|\/\*(?:[^*]|\*(?!\/))*\*\/)*(?:[,;})\]]|$))/gi;
 const PROJECT_ID_MENTION = /\bprojectId\b/gi;
+// Reading a config is linear in its size per entry; one this large is not an
+// app config but a file made to keep the server busy.
+const MAX_CONFIG_LENGTH = 256 * 1024;
 
 /** Whether a spread follows the entry at `from` in its object, which may replace it. */
 const spreadFollows = (source: string, from: number): boolean => {
@@ -73,6 +76,7 @@ const projectIdsOf = Effect.fn("easProjectId.projectIdsOf")(function* (dir: stri
     // Every mention of `projectId` must be a quoted entry: one set from a
     // variable, or assigned later, could be any project, and makes the
     // answer unknown.
+    if (source.length > MAX_CONFIG_LENGTH) return null;
     const mentions = source.match(PROJECT_ID_MENTION)?.length ?? 0;
     const entries = [...source.matchAll(QUOTED_PROJECT_ID)];
     const quoted = entries.map((match) => match[1]!);
