@@ -314,7 +314,7 @@ describe("EAS Simulator host", () => {
         JSON.stringify([
           { name: "T3 Code · EAS Simulator · left", appId: APP_ID, recordedAt: 0 },
           // Recorded long enough ago that Expo has ended it, so the record goes.
-          { name: "T3 Code · EAS Simulator · gone", appId: APP_ID, recordedAt: -121 * 60_000 },
+          { name: "T3 Code · EAS Simulator · gone", appId: APP_ID, recordedAt: -181 * 60_000 },
           // Recorded just now and not listed yet: kept for a later sweep.
           { name: "T3 Code · EAS Simulator · new", appId: APP_ID, recordedAt: 0 },
         ]),
@@ -437,7 +437,7 @@ describe("EAS Simulator host", () => {
       yield* fs.writeFileString(
         ledger,
         JSON.stringify([
-          { name: "T3 Code · EAS Simulator · gone", appId: APP_ID, recordedAt: -121 * 60_000 },
+          { name: "T3 Code · EAS Simulator · gone", appId: APP_ID, recordedAt: -181 * 60_000 },
         ]),
       );
       // The app is gone, say: listing it fails for good.
@@ -528,6 +528,24 @@ describe("EAS Simulator host", () => {
       yield* ready.devices.list;
       expect((yield* ready.devices.list).devices.map((device) => device.id)).toEqual(["eas-ios"]);
       expect(expo.stopped().filter((id) => id === "session-1").length).toBeGreaterThanOrEqual(2);
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+
+  it.effect("lets go of a stopping session Expo has ended although its stop keeps failing", () =>
+    Effect.gen(function* () {
+      let status = "IN_PROGRESS";
+      const expo = fakeExpo({ failStop: () => true, status: () => status });
+      const host = yield* makeHost(expo, config({ maxConcurrentSessions: 1 }), yield* Scope.make());
+      const ready = yield* host.ensureReady(() => Effect.void);
+      const [catalogDevice] = (yield* ready.devices.list).devices;
+      yield* ready.devices.boot(catalogDevice!);
+      yield* ready.devices.shutdown({ id: "session-1", platform: "ios" }).pipe(Effect.flip);
+      expect((yield* ready.devices.list).devices.map((device) => device.id)).toContain("session-1");
+      // Expo ended it by itself: the stop keeps failing, but the status says so.
+      status = "STOPPED";
+      expect((yield* ready.devices.list).devices.map((device) => device.id)).toEqual(["eas-ios"]);
+      status = "IN_PROGRESS";
+      expect(yield* ready.devices.boot(catalogDevice!)).toBe("session-2");
     }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 

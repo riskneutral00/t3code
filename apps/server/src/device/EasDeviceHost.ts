@@ -84,8 +84,10 @@ const encodeLedger = Schema.encodeSync(Ledger);
 const REAP_INTERVAL_MS = 60_000;
 // Expo ends every session within 115 minutes. A recorded session Expo does not
 // list (not showing yet, or past the first page) is only forgotten once it
-// cannot be running any more.
-const RECORD_LIFETIME_MS = 120 * 60_000;
+// cannot be running any more: Expo's longest session runs 115 minutes from
+// when it is ready, which can take a while after it is made, plus five
+// minutes of cleanup.
+const RECORD_LIFETIME_MS = 180 * 60_000;
 // Expo lists a session it made within seconds; a create with an unknown
 // outcome stops counting against the limit once it has had this long.
 const UNCERTAIN_CREATE_MS = 5 * 60_000;
@@ -577,7 +579,21 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
       stale,
       (session) =>
         (session.stopping
-          ? stopSession(expo, session.sessionId, session.name).pipe(Effect.andThen(forget(session)))
+          ? stopSession(expo, session.sessionId, session.name).pipe(
+              Effect.andThen(forget(session)),
+              // A session Expo already ended is let go even if stopping it keeps failing.
+              Effect.catch(() =>
+                expo
+                  .session(session.sessionId)
+                  .pipe(
+                    Effect.flatMap((current) =>
+                      current.status === "STOPPED" || current.status === "ERRORED"
+                        ? forget(session).pipe(Effect.andThen(forgetEntry(session.name)))
+                        : Effect.fail(current.status),
+                    ),
+                  ),
+              ),
+            )
           : expo
               .session(session.sessionId)
               .pipe(
