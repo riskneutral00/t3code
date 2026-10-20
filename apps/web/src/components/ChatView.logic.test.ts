@@ -1114,6 +1114,23 @@ describe("resolveThreadSwitchTimeline", () => {
     ).toEqual({ entries: ["fresh-b"], displayThreadKey: "env-1:thread-b" });
   });
 
+  it("does not paint a remembered snapshot the thread has moved past", () => {
+    rememberReadyThreadTimeline({
+      threadKey: "env-1:thread-b",
+      entries: ["old-b"],
+      updatedAt: Date.parse("2026-06-20T00:00:00.000Z"),
+    });
+    const shellUpdatedAt = "2026-06-20T00:05:00.000Z";
+    expect(
+      resolveThreadSwitchTimeline({
+        loading: true,
+        activeThreadKey: "env-1:thread-b",
+        nextEntries: [],
+        rememberedForActive: peekRememberedThreadTimeline("env-1:thread-b", shellUpdatedAt),
+      }),
+    ).toEqual({ entries: [], displayThreadKey: "env-1:thread-b" });
+  });
+
   it("does not keep a remembered snapshot on a resolved empty thread", () => {
     rememberReadyThreadTimeline(held);
     expect(

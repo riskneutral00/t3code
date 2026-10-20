@@ -324,7 +324,9 @@ export function applyOrchestrationV2ProjectionEvent(
         itemIndex === -1 &&
         shouldDropMissingPartialTurnItem(projection, event.payload, latestLocalTurnOrdinal)
       ) {
-        return projection;
+        // Still advance updatedAt: the server did, and the detail view compares
+        // it with the shell to tell a stale copy from a current one.
+        return base;
       }
       const turnItems = [...projection.turnItems];
       if (itemIndex === -1) turnItems.push(event.payload);

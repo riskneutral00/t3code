@@ -2829,7 +2829,10 @@ export default function ChatView(props: ChatViewProps) {
     loading: timelineEntries.length === 0 && threadSyncPhase !== null,
     activeThreadKey,
     nextEntries: timelineEntries,
-    rememberedForActive: peekRememberedThreadTimeline<typeof timelineEntries>(activeThreadKey),
+    rememberedForActive: peekRememberedThreadTimeline<typeof timelineEntries>(
+      activeThreadKey,
+      serverThread?.updatedAt,
+    ),
   });
   const displayedTimelineKey = displayedTimeline.displayThreadKey ?? routeThreadKey;
   const paintOnlyDisplayedTimeline = isPaintOnlyThreadTimeline(
@@ -2992,6 +2995,8 @@ export default function ChatView(props: ChatViewProps) {
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
   const activeThreadWorktreePath = activeThread?.worktreePath ?? null;
   const activeWorkspaceRoot = activeThreadWorktreePath ?? activeProjectCwd ?? undefined;
+  const serverProjectionUpdatedAt =
+    serverProjection === null ? null : DateTime.toEpochMillis(serverProjection.updatedAt);
   useLayoutEffect(() => {
     if (
       threadDetailLoading ||
@@ -3005,8 +3010,16 @@ export default function ChatView(props: ChatViewProps) {
       entries: timelineEntries,
       markdownCwd: gitCwd,
       workspaceRoot: activeWorkspaceRoot ?? null,
+      ...(serverProjectionUpdatedAt === null ? {} : { updatedAt: serverProjectionUpdatedAt }),
     });
-  }, [activeThreadKey, activeWorkspaceRoot, gitCwd, threadDetailLoading, timelineEntries]);
+  }, [
+    activeThreadKey,
+    activeWorkspaceRoot,
+    gitCwd,
+    serverProjectionUpdatedAt,
+    threadDetailLoading,
+    timelineEntries,
+  ]);
   const heldPaintContext = paintOnlyDisplayedTimeline
     ? peekHeldThreadTimeline<typeof timelineEntries>()
     : null;

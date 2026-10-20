@@ -325,6 +325,8 @@ export type HeldThreadTimeline<T extends readonly unknown[]> = {
   entries: T;
   markdownCwd?: string | null;
   workspaceRoot?: string | null;
+  /** Epoch ms of the projection these entries came from. */
+  updatedAt?: number;
 };
 
 const MAX_REMEMBERED_THREAD_TIMELINES = 16;
@@ -360,13 +362,26 @@ export function rememberReadyThreadTimeline<T extends readonly unknown[]>(
   rememberThreadTimelineEntries(held);
 }
 
+/** Skips entries older than `shellUpdatedAt`: the thread moved on since they were painted. */
 export function peekRememberedThreadTimeline<T extends readonly unknown[]>(
   threadKey: string | null,
+  shellUpdatedAt?: string | null,
 ): T | null {
   if (threadKey === null) {
     return null;
   }
-  return (rememberedThreadTimelines.get(threadKey)?.entries as T | undefined) ?? null;
+  const remembered = rememberedThreadTimelines.get(threadKey);
+  if (remembered === undefined) {
+    return null;
+  }
+  if (
+    shellUpdatedAt != null &&
+    remembered.updatedAt !== undefined &&
+    remembered.updatedAt < Date.parse(shellUpdatedAt)
+  ) {
+    return null;
+  }
+  return remembered.entries as T;
 }
 
 export function peekHeldThreadTimeline<
@@ -418,7 +433,9 @@ export function resolveThreadSwitchTimeline<T extends readonly unknown[]>(input:
   }
 
   const rememberedForActive =
-    input.rememberedForActive ?? peekRememberedThreadTimeline<T>(input.activeThreadKey);
+    input.rememberedForActive !== undefined
+      ? input.rememberedForActive
+      : peekRememberedThreadTimeline<T>(input.activeThreadKey);
   if (input.loading && rememberedForActive !== null && rememberedForActive.length > 0) {
     return { entries: rememberedForActive, displayThreadKey: input.activeThreadKey };
   }

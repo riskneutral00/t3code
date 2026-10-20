@@ -13,6 +13,7 @@ import {
   MessageId,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import { describe, expect, it } from "vite-plus/test";
@@ -107,6 +108,44 @@ describe("createEnvironmentThreadDetailAtoms", () => {
     expect(registry.get(details.statusAtom(ref))).toBe("deleted");
     expect(registry.get(details.errorAtom(ref))).toBeNull();
     expect(registry.get(details.historyAtom(ref))).toBe(EMPTY_THREAD_HISTORY_META);
+    registry.dispose();
+  });
+
+  it("holds back a saved copy the shell shows is behind until the thread catches up", () => {
+    const state = (projection: OrchestrationV2ThreadProjection, status: "cached" | "live") =>
+      AsyncResult.success(
+        threadState({ data: Option.some(projection), status, error: Option.none() }),
+      );
+    const sourceAtom = Atom.make<AsyncResult.AsyncResult<EnvironmentThreadState, never>>(
+      state(v2Projection, "cached"),
+    );
+    const shellAtom = Atom.make<{ readonly updatedAt: string } | null>({
+      updatedAt: "2026-06-20T00:05:00.000Z",
+    });
+    const details = createEnvironmentThreadDetailAtoms(
+      () => sourceAtom,
+      () => shellAtom,
+    );
+    const registry = AtomRegistry.make();
+    const unmount = registry.mount(details.threadAtom(ref));
+
+    expect(registry.get(details.threadAtom(ref))).toBeNull();
+    expect(registry.get(details.statusAtom(ref))).toBe("cached");
+
+    // A warm resume keeps its old "live" status but is just as far behind.
+    registry.set(sourceAtom, state(v2Projection, "live"));
+    expect(registry.get(details.threadAtom(ref))).toBeNull();
+    expect(registry.get(details.statusAtom(ref))).toBe("synchronizing");
+
+    const caughtUp = { ...v2Projection, updatedAt: DateTime.makeUnsafe("2026-06-20T00:05:00Z") };
+    registry.set(sourceAtom, state(caughtUp, "cached"));
+    expect(registry.get(details.threadAtom(ref))?.projection).toBe(caughtUp);
+
+    // Once messages are on screen, a shell that moves first does not blank them.
+    registry.set(shellAtom, { updatedAt: "2026-06-20T00:06:00.000Z" });
+    expect(registry.get(details.threadAtom(ref))?.projection).toBe(caughtUp);
+
+    unmount();
     registry.dispose();
   });
 });

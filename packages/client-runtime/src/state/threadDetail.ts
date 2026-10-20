@@ -1,4 +1,5 @@
 import type { OrchestrationV2ThreadProjection, ScopedThreadRef } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 
@@ -12,7 +13,8 @@ import {
   deriveThreadCheckpointSummaries,
   type ThreadCheckpointSummary,
 } from "./threadCheckpoints.ts";
-import type { EnvironmentThread } from "./models.ts";
+import type { EnvironmentThread, EnvironmentThreadShell } from "./models.ts";
+import { EMPTY_THREAD_HISTORY_META } from "./threadHistoryMerge.ts";
 import { EMPTY_ENVIRONMENT_THREAD_STATE, type EnvironmentThreadState } from "./threadState.ts";
 import {
   createQuestionHistoryProjector,
@@ -26,20 +28,54 @@ const EMPTY_VISIBLE_TURN_ITEMS: OrchestrationV2ThreadProjection["visibleTurnItem
 );
 const EMPTY_CHECKPOINT_SUMMARIES: ReadonlyArray<ThreadCheckpointSummary> = Object.freeze([]);
 
+// The shell's updatedAt is the server thread's last event time, so a detail
+// older than it is missing events.
+function isBehindShell(
+  projection: OrchestrationV2ThreadProjection,
+  shell: Pick<EnvironmentThreadShell, "updatedAt"> | null,
+): boolean {
+  return (
+    shell !== null && DateTime.toEpochMillis(projection.updatedAt) < Date.parse(shell.updatedAt)
+  );
+}
+
 export function createEnvironmentThreadDetailAtoms<E>(
   threadStateAtom: (
     environmentId: ScopedThreadRef["environmentId"],
     threadId: ScopedThreadRef["threadId"],
   ) => Atom.Atom<AsyncResult.AsyncResult<EnvironmentThreadState, E>>,
+  threadShellAtom?: (
+    ref: ScopedThreadRef,
+  ) => Atom.Atom<Pick<EnvironmentThreadShell, "updatedAt"> | null>,
 ) {
   const threadStateValueAtomFamily = Atom.family((key: string) => {
     const ref = parseThreadKey(key);
-    return Atom.make((get) =>
-      Option.getOrElse(
+    return Atom.make((get) => {
+      const state = Option.getOrElse(
         AsyncResult.value(get(threadStateAtom(ref.environmentId, ref.threadId))),
         () => EMPTY_ENVIRONMENT_THREAD_STATE,
-      ),
-    ).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-state-value:${key}`));
+      );
+      // A saved copy can be many turns old when the thread moved on while it
+      // was closed. Until the stream catches up, show it as loading rather
+      // than presenting old messages as the latest ones. Only an opening
+      // thread is held back: once messages are on screen, a reconnect that
+      // briefly trails the shell keeps them instead of blanking the view.
+      if (
+        threadShellAtom !== undefined &&
+        Option.isSome(state.data) &&
+        !Option.exists(get.self<EnvironmentThreadState>(), (shown) => Option.isSome(shown.data)) &&
+        isBehindShell(state.data.value, get(threadShellAtom(ref)))
+      ) {
+        // A warm resume keeps "live" from before it closed; it is catching up too.
+        return {
+          ...state,
+          data: Option.none(),
+          status: state.status === "live" ? "synchronizing" : state.status,
+          history: EMPTY_THREAD_HISTORY_META,
+        };
+      }
+      return state;
+    }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`environment-thread-state-value:${key}`));
   });
 
   const threadAtomFamily = Atom.family((key: string) => {
