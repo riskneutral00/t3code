@@ -274,6 +274,24 @@ it.effect("reads app.config.json like app.json", () =>
   }).pipe(Effect.scoped, Effect.provide(layer)),
 );
 
+it.effect("answers at once for a long comment before the rest of a joined id", () =>
+  Effect.gen(function* () {
+    // A comment with many slashes before a continuation made an earlier
+    // matcher try every way to split it into comments: minutes, not ms.
+    const urls = Array.from({ length: 40 }, () => "https://expo.dev").join(" ");
+    const root = yield* workspace({
+      "apps/mobile/app.config.ts": `export default {
+        extra: { eas: { projectId: "${ID_A.slice(0, 9)}" // ${urls}
+          + "${ID_A.slice(9)}" } },
+      };`,
+      "apps/kiosk/app.json": JSON.stringify({ expo: { extra: { eas: { projectId: ID_B } } } }),
+    });
+    const startedAt = performance.now();
+    expect(yield* findEasProjectId(root)).toEqual(Option.none());
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
+  }).pipe(Effect.scoped, Effect.provide(layer)),
+);
+
 it.effect("gives no answer when an app's config is there but cannot be read", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
