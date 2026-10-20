@@ -253,9 +253,6 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
                       { discard: true },
                     );
                   }
-                  if ((yield* Clock.currentTimeMillis) - entry.recordedAt > RECORD_LIFETIME_MS) {
-                    yield* forgetEntry(entry.name);
-                  }
                 }),
               { discard: true },
             ),
@@ -320,18 +317,19 @@ export const make = Effect.fn("EasDeviceHost.make")(function* (config: EasDevice
       reapedAt = yield* Clock.currentTimeMillis;
       const entries = yield* readLedger;
       const owned = ownedNames();
-      const { found, listed } = yield* stopRecorded(
-        expo,
-        entries.filter((entry) => !owned.has(entry.name)),
-      );
+      const leftovers = entries.filter((entry) => !owned.has(entry.name));
+      const { found, listed } = yield* stopRecorded(expo, leftovers);
       for (const [name, { entry, until }] of uncertain) {
         if (found.has(name) || (reapedAt >= until && listed.has(entry.appId))) {
           uncertain.delete(name);
-        } else if (reapedAt - entry.recordedAt > RECORD_LIFETIME_MS) {
-          // Expo has ended it by now, whatever the listing says (the app may
-          // be gone, or belong to another account): the slot and record go.
-          uncertain.delete(name);
-          yield* forgetEntry(name);
+        }
+      }
+      // Expo has ended these by now, whatever the listing says (the app may
+      // be gone, or belong to another account): slot and record go.
+      for (const entry of leftovers) {
+        if (reapedAt - entry.recordedAt > RECORD_LIFETIME_MS) {
+          uncertain.delete(entry.name);
+          yield* forgetEntry(entry.name);
         }
       }
     },

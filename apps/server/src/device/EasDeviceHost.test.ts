@@ -438,6 +438,12 @@ describe("EAS Simulator host", () => {
         ledger,
         JSON.stringify([
           { name: "T3 Code · EAS Simulator · gone", appId: APP_ID, recordedAt: -181 * 60_000 },
+          {
+            name: "T3 Code · EAS Simulator · refused",
+            appId: APP_ID,
+            recordedAt: -181 * 60_000,
+            refused: true,
+          },
         ]),
       );
       // The app is gone, say: listing it fails for good.
@@ -449,7 +455,10 @@ describe("EAS Simulator host", () => {
       const names = (JSON.parse(yield* fs.readFileString(ledger)) as Array<{ name: string }>).map(
         (entry) => entry.name,
       );
-      expect(names).not.toContain("T3 Code · EAS Simulator · gone");
+      // Only the new session's own record remains.
+      expect(
+        names.filter((name) => !name.endsWith("session-1") && !/[0-9a-f]{6}$/.test(name)),
+      ).toEqual([]);
     }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 
